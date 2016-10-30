@@ -433,6 +433,8 @@ void config_usb(
   free(buffer);
 }
 
+extern "C" void copy_pss_to_device();
+
 // Main cell search routine.
 int main(
   const int argc,
@@ -456,6 +458,8 @@ int main(
   double fs_programmed;
   if (!use_recorded_data)
     config_usb(correction,device_index,freq_start,dev,fs_programmed);
+
+  copy_pss_to_device();
 
   // Generate a list of center frequencies that should be searched and also
   // a list of frequency offsets that should be searched for each center
@@ -494,7 +498,7 @@ int main(
     if (verbosity>=2) {
       cout << "  Calculating PSS correlations" << endl;
     }
-    xcorr_pss(capbuf,f_search_set,DS_COMB_ARM,fc_requested,fc_programmed,fs_programmed,xc_incoherent_collapsed_pow,xc_incoherent_collapsed_frq,xc_incoherent_single,xc_incoherent,sp_incoherent,xc,sp,n_comb_xc,n_comb_sp);
+    xcorr_pss2(capbuf,f_search_set,DS_COMB_ARM,fc_requested,fc_programmed,fs_programmed,xc_incoherent_collapsed_pow,xc_incoherent_collapsed_frq,xc_incoherent_single,xc_incoherent,sp_incoherent,xc,sp,n_comb_xc,n_comb_sp);
 
     // Calculate the threshold vector
     const uint8 thresh1_n_nines=12;
