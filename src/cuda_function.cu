@@ -32,8 +32,6 @@ using namespace itpp;
 
 __constant__ cufftComplex pss_td[3][256];
 
-#define THREAD_DIM_X   (256)
-
 extern "C" void copy_pss_to_device()
 {
     int i, t, len;
@@ -78,10 +76,10 @@ __global__ void xc_correlate_kernel(cufftComplex *d_capbuf, float *d_xc_sqr,
     s_capbuf[tid] = d_capbuf[256 * bid + tid];
 
     if (tid < 137) {
-        if (THREAD_DIM_X * bid + THREAD_DIM_X + tid < n_cap) {
-            s_capbuf[THREAD_DIM_X + tid] = d_capbuf[THREAD_DIM_X * bid + THREAD_DIM_X + tid];
+        if (256 * bid + 256 + tid < n_cap) {
+            s_capbuf[256 + tid] = d_capbuf[256 * bid + 256 + tid];
         } else {
-            s_capbuf[THREAD_DIM_X + tid] = d_capbuf[tid];
+            s_capbuf[256 + tid] = d_capbuf[tid];
         }
     }
   
@@ -95,7 +93,7 @@ __global__ void xc_correlate_kernel(cufftComplex *d_capbuf, float *d_xc_sqr,
         real += COMPLEX_MUL_REAL(s_fshift_pss[i], s_capbuf[tid + i]);
         imag += COMPLEX_MUL_IMAG(s_fshift_pss[i], s_capbuf[tid + i]);
     }
-    d_xc_sqr[THREAD_DIM_X * bid + tid] = (real * real + imag * imag) / (137.0*137.0);
+    d_xc_sqr[256 * bid + tid] = (real * real + imag * imag) / (137.0*137.0);
 
     __syncthreads();
 
@@ -186,24 +184,23 @@ __global__ void sp_incoherent_kernel(cufftComplex *d_capbuf, float *d_sp_incoher
     __syncthreads();
 }
 
-void xcorr_pss2(
-                       const cvec & capbuf,
-                       const vec & f_search_set,
-                       const uint8 & ds_comb_arm,
-                       const double & fc_requested,
-                       const double & fc_programmed,
-                       const double & fs_programmed,
-                       // Outputs
-                       mat & xc_incoherent_collapsed_pow,
-                       imat & xc_incoherent_collapsed_frq,
-                       // Following used only for debugging...
-                       vf3d & xc_incoherent_single,
-                       vf3d & xc_incoherent,
-                       vec & sp_incoherent,
-                       vcf3d & xc,
-                       vec & sp,
-                       uint16 & n_comb_xc,
-                       uint16 & n_comb_sp)
+void xcorr_pss2(const cvec & capbuf,
+                const vec & f_search_set,
+                const uint8 & ds_comb_arm,
+                const double & fc_requested,
+                const double & fc_programmed,
+                const double & fs_programmed,
+                // Outputs
+                mat & xc_incoherent_collapsed_pow,
+                imat & xc_incoherent_collapsed_frq,
+                // Following used only for debugging...
+                vf3d & xc_incoherent_single,
+                vf3d & xc_incoherent,
+                vec & sp_incoherent,
+                vcf3d & xc,
+                vec & sp,
+                uint16 & n_comb_xc,
+                uint16 & n_comb_sp)
 {
     struct timeval tv1, tv2;
     gettimeofday(&tv1, NULL);
@@ -319,202 +316,4 @@ void xcorr_pss2(
     gettimeofday(&tv2, NULL);
     printf("xcorr_pss2 : %ld us\n", (tv2.tv_sec-tv1.tv_sec)*1000000+(tv2.tv_usec-tv1.tv_usec));
 }
-
-
-void xcorr_pss_orig(
-  // Inputs
-  const cvec & capbuf,
-  const vec & f_search_set,
-  const uint8 & ds_comb_arm,
-  const double & fc_requested,
-  const double & fc_programmed,
-  const double & fs_programmed,
-  // Outputs
-  mat & xc_incoherent_collapsed_pow,
-  imat & xc_incoherent_collapsed_frq,
-  // Following used only for debugging...
-  vf3d & xc_incoherent_single,
-  vf3d & xc_incoherent,
-  vec & sp_incoherent,
-  vcf3d & xc,
-  vec & sp,
-  uint16 & n_comb_xc,
-  uint16 & n_comb_sp
-) 
-{
-  // Perform correlations
-  const uint32 n_cap=length(capbuf);
-  const uint16 n_f=length(f_search_set);
-
-  // Set aside space for the vector and initialize with NAN's.
-#ifndef NDEBUG
-  xc = vector < vector < vector < complex < float > > > > (3,vector< vector < complex < float > > >(n_cap-136, vector < complex < float > > (n_f,NAN)));
-  vcf3d xc2 = vector < vector < vector < complex < float > > > > (3,vector< vector < complex < float > > >(n_cap-136, vector < complex < float > > (n_f,NAN)));
-  xc_incoherent_single = vector < vector < vector < float > > > (3,vector< vector < float > >(9600, vector < float > (n_f,NAN)));
-  xc_incoherent = vector < vector < vector < float > > > (3,vector< vector < float > >(9600, vector < float > (n_f,NAN)));
-#else
-  xc = vector < vector < vector < complex < float > > > > (3,vector< vector < complex < float > > >(n_cap-136, vector < complex < float > > (n_f)));
-  vcf3d xc2 = vector < vector < vector < complex < float > > > > (3,vector< vector < complex < float > > >(n_cap-136, vector < complex < float > > (n_f)));
-  xc_incoherent_single = vector < vector < vector < float > > > (3,vector< vector < float > >(9600, vector < float > (n_f)));
-  xc_incoherent = vector < vector < vector < float > > > (3,vector< vector < float > >(9600, vector < float > (n_f)));
-#endif
-  vec xc_sqr = vec(n_cap-136);
-
-  // Local variables declared outside of the loop.
-  double f_off;
-  cvec temp;
-  complex <double> acc;
-  uint16 foi;
-  uint8 t;
-  uint32 k;
-  uint8 m;
-
-  struct timeval tv1, tv2;
-  gettimeofday(&tv1, NULL);
-
-  // Loop and perform correlations.
-  // Incoherently combine correlations
-  n_comb_xc = floor_i((xc[0].size()-100)/9600);
-  const uint8 ds_com_arm_weight = (2*ds_comb_arm+1);
-  printf("n_cap=%d\n", n_cap);
-
-#if 0
-  sp_incoherent = vec(9600);
-  xc_incoherent_collapsed_pow = mat(3,9600);
-  xc_incoherent_collapsed_frq = imat(3,9600);
-
-  xc_correlate_step(capbuf,
-                    f_search_set,
-                    ds_comb_arm,
-                    fc_requested,
-                    fc_programmed,
-                    fs_programmed,
-                    // Outputs
-                    xc_incoherent_collapsed_pow,
-                    xc_incoherent_collapsed_frq,
-                    // Following used only for debugging...
-                    xc_incoherent_single,
-                    xc_incoherent,
-                    sp_incoherent,
-                    xc,
-                    sp,
-                    n_comb_xc,
-                    n_comb_sp);
-#else
-  for (foi=0;foi<n_f;foi++) {
-    f_off = f_search_set(foi);
-    const double k_factor = (fc_requested-f_off)/fc_programmed;
-    for (t = 0; t < 3;t++) {
-      temp = ROM_TABLES.pss_td[t];
-      temp = fshift(temp,f_off,fs_programmed*k_factor);
-      temp = conj(temp)/137;
-#ifdef _OPENMP
-#pragma omp parallel for shared(temp,capbuf,xc) private(k,acc,m)
-#endif
-      for (k=0;k<n_cap-136;k++) {
-        acc=0;
-        for (m=0;m<137;m++) {
-          // Correlations are performed at the 2x rate which effectively
-          // performs filtering and correlating at the same time. Thus,
-          // this algorithm can handle huge frequency offsets limited only
-          // by the bandwidth of the capture device.
-          // Correlations can also be done at the 1x rate if filtering is
-          // peformed first, but this will limit the set of frequency offsets
-          // that this algorithm can detect. 1x rate correlations will,
-          // however, be nearly twice as fast as the 2x correlations
-          // performed here.
-          acc+=temp(m)*capbuf(k+m);
-        }
-        xc[t][k][foi]=acc;
-      }
-
-      for (uint16 idx=0;idx<9600;idx++) {
-        // Because of the large supported frequency offsets and the large
-        // amount of time represented by the capture buffer, the length
-        // in samples, of a frame varies by the frequency offset.
-        //double actual_time_offset=m*.005*k_factor;
-        //double actual_start_index=itpp::round_i(actual_time_offset*FS_LTE/16);
-        xc_incoherent_single[t][idx][foi] = 0;
-        for (uint16 m = 0; m < n_comb_xc; m++) {
-          uint32 actual_start_index = itpp::round_i(m*.005*k_factor*fs_programmed);
-          xc_incoherent_single[t][idx][foi] += xc[t][idx + actual_start_index][foi].real() * xc[t][idx + actual_start_index][foi].real() + 
-                                               xc[t][idx + actual_start_index][foi].imag() * xc[t][idx + actual_start_index][foi].imag();
-        }
-        xc_incoherent_single[t][idx][foi]/= n_comb_xc;
-      }
-
-      for (uint16 idx=0;idx<9600;idx++) {
-        xc_incoherent[t][idx][foi] = xc_incoherent_single[t][idx][foi];
-        for (uint8 k=1;k<=ds_comb_arm;k++) {
-          xc_incoherent[t][idx][foi] += (xc_incoherent_single[t][itpp_ext::matlab_mod(idx-k,9600)][foi] + xc_incoherent_single[t][itpp_ext::matlab_mod(idx+k,9600)][foi]);
-        }
-        xc_incoherent[t][idx][foi] /= ds_com_arm_weight;
-      }
-    }
-  }
-#endif
-
-  // Estimate received signal power
-  // const uint32 n_cap=length(capbuf);
-
-#if 0
-  n_comb_sp = floor_i((n_cap-136-137)/9600);
-  const uint32 n_sp = n_comb_sp*9600;
-
-  // Set aside space for the vector and initialize with NAN's.
-  sp = vec(n_sp);
-#ifndef NDEBUG
-  sp = NAN;
-#endif
-  sp[0] = 0;
-  // Estimate power for first time offset
-  for (uint16 t=0;t<274;t++) {
-    sp[0] += pow(capbuf[t].real(),2) + pow(capbuf[t].imag(),2);
-  }
-  sp[0] = sp[0] / 274;
-  // Estimate RX power for remaining time offsets.
-  for (uint32 t=1;t<n_sp;t++) {
-    sp[t] = sp[t-1] + (-pow(capbuf[t-1].real(),2)-pow(capbuf[t-1].imag(),2)+pow(capbuf[t+274-1].real(),2)+pow(capbuf[t+274-1].imag(),2))/274;
-  }
-
-  // Combine incoherently
-  sp_incoherent = sp.left(9600);
-  for (uint16 t=1; t < n_comb_sp;t++) {
-    sp_incoherent += sp.mid(t*9600, 9600);
-  }
-  sp_incoherent = sp_incoherent / n_comb_sp;
-
-  // Shift to the right by 137 samples to align with the correlation peaks.
-  tshift(sp_incoherent, 137);
-
-  // Search for peaks among all the frequency offsets.
-  // const int n_f=xc_incoherent[0][0].size();
-
-  xc_incoherent_collapsed_pow = mat(3,9600);
-  xc_incoherent_collapsed_frq = imat(3,9600);
-#ifndef NDEBUG
-  xc_incoherent_collapsed_pow = NAN;
-  xc_incoherent_collapsed_frq = -1;
-#endif
-  for (uint8 t=0;t<3;t++) {
-    for (uint16 k=0;k<9600;k++) {
-      double best_pow=xc_incoherent[t][k][0];
-      uint16 best_idx=0;
-      for (uint16 foi=1;foi<n_f;foi++) {
-        if (xc_incoherent[t][k][foi]>best_pow) {
-          best_pow=xc_incoherent[t][k][foi];
-          best_idx=foi;
-        }
-      }
-      xc_incoherent_collapsed_pow(t,k)=best_pow;
-      xc_incoherent_collapsed_frq(t,k)=best_idx;
-    }
-  }
-#endif
-
-  gettimeofday(&tv2, NULL);
-  printf("xcorr_pss2 : %ld us\n", (tv2.tv_sec-tv1.tv_sec)*1000000+(tv2.tv_usec-tv1.tv_usec));
-}
-
-
 
