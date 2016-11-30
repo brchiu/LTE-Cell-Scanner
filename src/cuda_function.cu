@@ -363,7 +363,7 @@ void xcorr_pss2(const cvec & capbuf,
     sp_incoherent = vec(9600);
     xc_incoherent_collapsed_pow = mat(3, 9600);
     xc_incoherent_collapsed_frq = imat(3, 9600);
-    xc_incoherent_single = vector < vector < vector < float >> > (3,vector< vector < float >>(9600, vector < float > (n_f)));
+    xc_incoherent_single = vector < vector < vector < float > > > (3,vector< vector < float > >(9600, vector < float > (n_f)));
 
     for (unsigned int foi = 0; foi < n_f; foi++) {
         for (unsigned int t = 0; t < 3; t++) {
@@ -1005,8 +1005,6 @@ extern "C" Cell extract_tfg_and_tfoec(
     cell_out.freq_superfine = cell_out.freq_fine + h_residual_f;
     return cell_out;
 }
-
-
 
 
 
