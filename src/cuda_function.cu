@@ -32,7 +32,7 @@ using namespace itpp;
 
 #define SIGNAL_SIZE 128
 #define SQRT2_INV   (0.7071067817811865475)
-#define SQRT12_INV  (0.0883883476483184)
+#define SQRT128_INV (0.0883883476483184)
 
 __constant__ cufftDoubleComplex pss_td[3][256];
 __constant__ cufftDoubleComplex d_tw128[SIGNAL_SIZE];
@@ -226,8 +226,8 @@ __global__ void xc_incoherent_collapsed_kernel(double *d_xc_incoherent,
                                                double *d_xc_incoherent_collapsed_pow, int *d_xc_incoherent_collapsed_frq,
                                                unsigned int n_f)
 {
-    unsigned int tid = threadIdx.x;
-    unsigned int bid = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+    const unsigned int bid = blockIdx.x;
     double best_pow = d_xc_incoherent[(0 * 3 + tid) * 9600 + bid];
     unsigned int best_index = 0;
 
@@ -663,13 +663,13 @@ __global__ void extract_tfg_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComp
         coeff.x =  cos(2 * CUDART_PI * late * i / 128);
         coeff.y = -sin(2 * CUDART_PI * late * i / 128);
 
-        d_tfg[tid * 72 + 35 + i].x = SQRT12_INV * COMPLEX_MUL_REAL(s_capbuf[i], coeff);
-        d_tfg[tid * 72 + 35 + i].y = SQRT12_INV * COMPLEX_MUL_IMAG(s_capbuf[i], coeff);
+        d_tfg[tid * 72 + 35 + i].x = SQRT128_INV * COMPLEX_MUL_REAL(s_capbuf[i], coeff);
+        d_tfg[tid * 72 + 35 + i].y = SQRT128_INV * COMPLEX_MUL_IMAG(s_capbuf[i], coeff);
 
         coeff.y = -coeff.y;
 
-        d_tfg[tid * 72 + 36 - i].x = SQRT12_INV * COMPLEX_MUL_REAL(s_capbuf[128 - i], coeff);
-        d_tfg[tid * 72 + 36 - i].y = SQRT12_INV * COMPLEX_MUL_IMAG(s_capbuf[128 - i], coeff);
+        d_tfg[tid * 72 + 36 - i].x = SQRT128_INV * COMPLEX_MUL_REAL(s_capbuf[128 - i], coeff);
+        d_tfg[tid * 72 + 36 - i].y = SQRT128_INV * COMPLEX_MUL_IMAG(s_capbuf[128 - i], coeff);
     }
 }
 
@@ -968,6 +968,7 @@ extern "C" Cell extract_tfg_and_tfoec(
 
     checkCudaErrors(cudaMemcpy(h_tfg, d_tfg, n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(&h_residual_f, d_residual_f, sizeof(double), cudaMemcpyDeviceToHost));
+
     my_tfg_comp = cmat(n_ofdm_sym, 72);
     for (int i = 0; i < n_ofdm_sym; i++) {
         for (unsigned int j = 0; j < 72; j++) {
