@@ -958,12 +958,14 @@ extern "C" Cell extract_tfg_and_tfoec(
     extract_tfg_kernel<<<1, n_ofdm_sym>>>(d_capbuf, d_tfg, d_rs_extracted, d_tfg_timestamp,
                                           n_id_cell, n_symb_dl, frame_start,
                                           fc_requested, fc_programmed, fs_programmed, cell.freq_fine);
+    checkCudaErrors(cudaDeviceSynchronize());
 
     tfoec_kernel<<<1, n_ofdm_sym>>>(d_capbuf, d_tfg, d_rs_extracted, d_tfg_timestamp,
                                     n_id_cell, n_symb_dl,
                                     fc_requested, fc_programmed, fs_programmed, cell.freq_fine,
                                     // output
                                     d_residual_f);
+    checkCudaErrors(cudaDeviceSynchronize());
 
     checkCudaErrors(cudaMemcpy(h_tfg, d_tfg, n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(&h_residual_f, d_residual_f, sizeof(double), cudaMemcpyDeviceToHost));
