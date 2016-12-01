@@ -937,11 +937,10 @@ extern "C" Cell extract_tfg_and_tfoec(
     cufftDoubleComplex *h_tfg = (cufftDoubleComplex *)NULL, *d_tfg = (cufftDoubleComplex *)NULL;
     cufftDoubleComplex *d_rs_extracted = (cufftDoubleComplex *)NULL;
     double h_residual_f, *d_residual_f = (double *)NULL;
-    double *h_tfg_timestamp = (double *)NULL, *d_tfg_timestamp = (double *)NULL;
+    double *d_tfg_timestamp = (double *)NULL;
 
     h_capbuf = (cufftDoubleComplex *)malloc(n_cap * sizeof(cufftDoubleComplex));
     h_tfg = (cufftDoubleComplex *)malloc(n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex));
-    h_tfg_timestamp = (double *)malloc(n_ofdm_sym * sizeof(double));
 
     checkCudaErrors(cudaMalloc(&d_capbuf, n_cap * sizeof(cufftDoubleComplex)));
     checkCudaErrors(cudaMalloc(&d_tfg, n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex)));
@@ -969,8 +968,6 @@ extern "C" Cell extract_tfg_and_tfoec(
 
     checkCudaErrors(cudaMemcpy(h_tfg, d_tfg, n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(&h_residual_f, d_residual_f, sizeof(double), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(h_tfg_timestamp, d_tfg_timestamp, n_ofdm_sym * sizeof(double), cudaMemcpyDeviceToHost));
-
     my_tfg_comp = cmat(n_ofdm_sym, 72);
     for (int i = 0; i < n_ofdm_sym; i++) {
         for (unsigned int j = 0; j < 72; j++) {
