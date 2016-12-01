@@ -125,6 +125,27 @@ extern "C" void generate_twiddle_factor(int N)
     checkCudaErrors(cudaMemcpyToSymbol(d_radix4_bitreverse, &h_radix4_bitreverse, sizeof(h_radix4_bitreverse)));
 }
 
+
+__device__ double angle(float real, float imag)
+{
+    if (real > 0.0) {
+        return atan(imag / real);
+    } else if (real < 0.0) {
+        if (imag >= 0.0) {
+            return atan(imag / real) + CUDART_PI;
+        } else {
+            return atan(imag / real) - CUDART_PI;
+        }
+    } else if (imag > 0.0) {
+        return CUDART_PI / 2;
+    } else if (imag < 0.0) {
+        return -CUDART_PI / 2;
+    } else {
+        return CUDART_NAN;
+    }
+}
+
+
 #define COMPLEX_MUL_REAL(a, b)  ((a).x * (b).x - (a).y * (b).y)
 #define COMPLEX_MUL_IMAG(a, b)  ((a).x * (b).y + (a).y * (b).x)
 
@@ -135,14 +156,16 @@ __global__ void xc_correlate_kernel(cufftDoubleComplex *d_capbuf, double *d_xc_s
 {
     __shared__ cufftDoubleComplex s_fshift_pss[256], s_capbuf[256 + 137];
 
-    unsigned int tid = threadIdx.x;
-    unsigned int bid = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+    const unsigned int bid = blockIdx.x;
     double k = CUDART_PI * f * 2 / fs;
     double shift = k * tid;
     double x1 = cos(shift), y1 = sin(shift);
     double x2 = pss_td[t][tid].x, y2 = pss_td[t][tid].y;
     unsigned int max_m = (n_cap - 100 - 136) / 9600;
-    unsigned int i, m;
+    unsigned int i, m, index = 0;
+    double real, imag;
+    double xc_incoherent_single_val = 0.0, xc_incoherent_value = 0.0;
 
     s_fshift_pss[tid].x = x1*x2 - y1*y2;
     s_fshift_pss[tid].y = -x1*y2 - x2*y1;
@@ -159,8 +182,6 @@ __global__ void xc_correlate_kernel(cufftDoubleComplex *d_capbuf, double *d_xc_s
 
     __syncthreads();
 
-    double real, imag;
-
     real = COMPLEX_MUL_REAL(s_fshift_pss[0], s_capbuf[tid]);
     imag = COMPLEX_MUL_IMAG(s_fshift_pss[0], s_capbuf[tid]);
     for (i = 1; i < 137; i++) {
@@ -172,16 +193,18 @@ __global__ void xc_correlate_kernel(cufftDoubleComplex *d_capbuf, double *d_xc_s
     __syncthreads();
 
     if (tid < 16) {
-        unsigned int index = 16 * bid + tid;
-        double xc_incoherent_single_val = d_xc_sqr[index];
+        index = 16 * bid + tid;
+        xc_incoherent_single_val = d_xc_sqr[index];
         for (m = 1; m < max_m; m++) {
             unsigned int span = m * 0.005 * fs;
             xc_incoherent_single_val += d_xc_sqr[index + span];
         }
-        double xc_incoherent_value = d_xc_incoherent_single[index] = xc_incoherent_single_val / max_m;
+        xc_incoherent_value = d_xc_incoherent_single[index] = xc_incoherent_single_val / max_m;
+    }
 
-        __syncthreads();
+    __syncthreads();
 
+    if (tid < 16) {
         for (i = 1; i <= ds_comb_arm; i++) {
             if (index + i < 9600) {
                 xc_incoherent_value += d_xc_incoherent_single[index + i];
@@ -196,8 +219,6 @@ __global__ void xc_correlate_kernel(cufftDoubleComplex *d_capbuf, double *d_xc_s
         }
         d_xc_incoherent[index] = xc_incoherent_value / (ds_comb_arm * 2 + 1);
     }
-
-    __syncthreads();
 }
 
 
@@ -225,9 +246,9 @@ __global__ void sp_incoherent_kernel(cufftDoubleComplex *d_capbuf, double *d_sp_
 {
     __shared__ double s_sqr[512];
 
-    unsigned int tid = threadIdx.x;
-    unsigned int bid = blockIdx.x;
-    unsigned int n_comb_sp = (n_cap - 136 - 137) / 9600;
+    const unsigned int tid = threadIdx.x;
+    const unsigned int bid = blockIdx.x;
+    const unsigned int n_comb_sp = (n_cap - 136 - 137) / 9600;
     unsigned int index = bid * 16 + tid;
     double value;
 
@@ -254,8 +275,6 @@ __global__ void sp_incoherent_kernel(cufftDoubleComplex *d_capbuf, double *d_sp_
         d_sp_incoherent[index] = value / (274.0 * n_comb_sp);
         d_Z_th1[index] = d_sp_incoherent[index] * Z_th1_factor;
     }
-
-    __syncthreads();
 }
 
 
@@ -591,33 +610,11 @@ __device__ void kernel_fft_radix2(cufftDoubleComplex *c_io, int N)
     }
 }
 
-__device__ double angle(float real, float imag)
-{
-    if (real > 0.0) {
-        return atan(imag / real);
-    } else if (real < 0.0) {
-        if (imag >= 0.0) {
-            return atan(imag / real) + CUDART_PI;
-        } else {
-            return atan(imag / real) - CUDART_PI;
-        }
-    } else if (imag > 0.0) {
-        return CUDART_PI / 2;
-    } else if (imag < 0.0) {
-        return -CUDART_PI / 2;
-    } else {
-        return CUDART_NAN;
-    }
-}
 
 __global__ void extract_tfg_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d_tfg, cufftDoubleComplex *d_rs_extracted, double *d_tfg_timestamp,
                                    unsigned short n_id_cell, int n_symb_dl, double frame_start,
-                                   double fc_requested, double fc_programmed, double fs_programmed, double freq_fine,
-                                   // output
-                                   double *d_residual_f)
+                                   double fc_requested, double fc_programmed, double fs_programmed, double freq_fine)
 {
-    __shared__ unsigned int rs_dl[20 * 3];
-
     const unsigned int tid = threadIdx.x;
 
     cufftDoubleComplex s_capbuf[128];
@@ -651,17 +648,6 @@ __global__ void extract_tfg_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComp
 
     kernel_fft_radix2(s_capbuf, 128);
 
-    __syncthreads();
-
-    // generate random sequences for symbol 0, 1, 3/4 of 20 slots
-
-    if (tid < 20 * 3) {
-        int slot = tid / 3;
-        int l = (tid % 3 == 2) ? n_symb_dl - 3 : tid % 3;
-        int cinit = ((7 * (slot + 1) + l + 1) * (2 * n_id_cell + 1) << 10) + 2 * n_id_cell + (n_symb_dl == 7 ? 1 : 0);
-
-        pn_seq_lsb_to_msb(cinit, 6 * 2 * 2, (55 - 3) * 2 * 2, &rs_dl[tid]);
-    }
 
     //  92,  93,  94, ... , 127,  1,  2,  3, ..., 36 -> concat(dft_out.right(36), dft_out.mid(1, 36))
     //   0,   1,   2,     ,  35, 36, 37, 38,    , 71
@@ -685,13 +671,11 @@ __global__ void extract_tfg_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComp
         d_tfg[tid * 72 + 36 - i].x = SQRT12_INV * COMPLEX_MUL_REAL(s_capbuf[128 - i], coeff);
         d_tfg[tid * 72 + 36 - i].y = SQRT12_INV * COMPLEX_MUL_IMAG(s_capbuf[128 - i], coeff);
     }
-
-    __syncthreads();
 }
 
 
 __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d_tfg, cufftDoubleComplex *d_rs_extracted, double *d_tfg_timestamp,
-                             unsigned short n_id_cell, int n_symb_dl, double frame_start,
+                             unsigned short n_id_cell, int n_symb_dl,
                              double fc_requested, double fc_programmed, double fs_programmed, double freq_fine,
                              // output
                              double *d_residual_f)
@@ -701,7 +685,7 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
     __shared__ float toe_real, toe_imag;
 
     const unsigned int tid = threadIdx.x;
-    double dft_location = d_tfg_timestamp[tid];
+    double dft_location;
     double late;
 
     // generate random sequences for symbol 0, 1, 3/4 of 20 slots
@@ -714,8 +698,13 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
         pn_seq_lsb_to_msb(cinit, 6 * 2 * 2, (55 - 3) * 2 * 2, &rs_dl[tid]);
     }
 
-    foe_real = 0.0; foe_imag = 0.0;
-    toe_real = 0.0; toe_imag = 0.0;
+    if (tid == 0) {
+        foe_real = 0.0; foe_imag = 0.0;
+        toe_real = 0.0; toe_imag = 0.0;
+    }
+
+    dft_location = d_tfg_timestamp[tid];
+
     __syncthreads();
 
     if (tid < 122 * 2) {
@@ -771,8 +760,6 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
 
         atomicAdd(&foe_real, real);
         atomicAdd(&foe_imag, imag);
-
-        __syncthreads();
     }
 
     __syncthreads();
@@ -781,7 +768,7 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
     double k_factor_residual = (fc_requested - residual_f) / fc_programmed;
     late = dft_location - k_factor_residual * dft_location;
 
-    *d_residual_f = residual_f;
+    if (tid == 0) *d_residual_f = residual_f;
 
     // -36, -35, -34, ... ,  -1,  1,  2,  3, .... 36
     // exp((-J * 2 * pi * late / 128) * cn)
@@ -929,8 +916,6 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
         d_tfg[tid * 72 + 36 - i].x = real;
         d_tfg[tid * 72 + 36 - i].y = imag;
     }
-
-    __syncthreads();
 }
 
 extern "C" Cell extract_tfg_and_tfoec(
@@ -945,8 +930,9 @@ extern "C" Cell extract_tfg_and_tfoec(
     const double frame_start = cell.frame_start;
     const int n_symb_dl = cell.n_symb_dl();
     const int n_ofdm_sym = (6*10*2+2)*n_symb_dl;
+    const unsigned int n_cap = capbuf_raw.length();
+    const unsigned int n_id_cell = cell.n_id_cell();
 
-    unsigned int n_cap = capbuf_raw.length();
     cufftDoubleComplex *h_capbuf = (cufftDoubleComplex *)NULL, *d_capbuf = (cufftDoubleComplex *)NULL;
     cufftDoubleComplex *h_tfg = (cufftDoubleComplex *)NULL, *d_tfg = (cufftDoubleComplex *)NULL;
     cufftDoubleComplex *d_rs_extracted = (cufftDoubleComplex *)NULL;
@@ -970,13 +956,11 @@ extern "C" Cell extract_tfg_and_tfoec(
     checkCudaErrors(cudaMemcpy(d_capbuf, h_capbuf, n_cap * sizeof(cufftDoubleComplex), cudaMemcpyHostToDevice));
 
     extract_tfg_kernel<<<1, n_ofdm_sym>>>(d_capbuf, d_tfg, d_rs_extracted, d_tfg_timestamp,
-                                          cell.n_id_cell(), n_symb_dl, frame_start,
-                                          fc_requested, fc_programmed, fs_programmed, cell.freq_fine,
-                                          // output
-                                          d_residual_f);
+                                          n_id_cell, n_symb_dl, frame_start,
+                                          fc_requested, fc_programmed, fs_programmed, cell.freq_fine);
 
     tfoec_kernel<<<1, n_ofdm_sym>>>(d_capbuf, d_tfg, d_rs_extracted, d_tfg_timestamp,
-                                    cell.n_id_cell(), cell.n_symb_dl(), frame_start,
+                                    n_id_cell, n_symb_dl,
                                     fc_requested, fc_programmed, fs_programmed, cell.freq_fine,
                                     // output
                                     d_residual_f);
@@ -1005,6 +989,5 @@ extern "C" Cell extract_tfg_and_tfoec(
     cell_out.freq_superfine = cell_out.freq_fine + h_residual_f;
     return cell_out;
 }
-
 
 
