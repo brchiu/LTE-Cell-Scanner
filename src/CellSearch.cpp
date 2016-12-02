@@ -435,7 +435,7 @@ void config_usb(
 }
 
 extern "C" void cuda_reset_device();
-extern "C" void copy_pss_to_device();
+extern "C" void cuda_copy_constant_data_to_device();
 extern "C" void generate_twiddle_factor(int N);
 extern "C" Cell extract_tfg_and_tfoec(Cell & cell, const cvec & capbuf_raw, const double & fc_requested, const double & fc_programmed, const double & fs_programmed,
              // Output
@@ -466,8 +466,8 @@ int main(
     config_usb(correction,device_index,freq_start,dev,fs_programmed);
 
   cuda_reset_device();
-  copy_pss_to_device();
   generate_twiddle_factor(128);
+  cuda_copy_constant_data_to_device();
 
   // Generate a list of center frequencies that should be searched and also
   // a list of frequency offsets that should be searched for each center
@@ -554,12 +554,13 @@ gettimeofday(&tv5, NULL);
       }
 
       // Fine FOE
+#if 0
 gettimeofday(&tv6, NULL);
       (*iterator)=pss_sss_foe((*iterator),capbuf,fc_requested,fc_programmed,fs_programmed);
 gettimeofday(&tv7, NULL);
 
       // Extract time and frequency grid
-#if 0
+
       cmat tfg;
       vec tfg_timestamp;
       extract_tfg((*iterator),capbuf,fc_requested,fc_programmed,fs_programmed,tfg,tfg_timestamp);
