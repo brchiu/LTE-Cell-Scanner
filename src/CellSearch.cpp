@@ -576,7 +576,7 @@ gettimeofday(&tv9, NULL);
       (*iterator)=tfoec((*iterator),tfg,tfg_timestamp,fc_requested,fc_programmed,rs_dl,tfg_comp,tfg_comp_timestamp);
 gettimeofday(&tv10, NULL);
 #else
-
+gettimeofday(&tv7, NULL);
       RS_DL rs_dl((*iterator).n_id_cell(),6,(*iterator).cp_type);
 gettimeofday(&tv8, NULL);
 
