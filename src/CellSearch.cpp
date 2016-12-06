@@ -596,7 +596,7 @@ if (verbosity>=1) {
 cout << "xcorr_pss2  " << (tv2.tv_sec-tv1.tv_sec)*1000000+(tv2.tv_usec-tv1.tv_usec) << " us" << endl;
 cout << "peak_search " << (tv3.tv_sec-tv2.tv_sec)*1000000+(tv3.tv_usec-tv2.tv_usec) << " us" << endl;
 cout << "sss_detect  " << (tv5.tv_sec-tv4.tv_sec)*1000000+(tv5.tv_usec-tv4.tv_usec) << " us" << endl;
-cout << "pss_sss_foe " << (tv7.tv_sec-tv6.tv_sec)*1000000+(tv7.tv_usec-tv6.tv_usec) << " us" << endl;
+// cout << "pss_sss_foe " << (tv7.tv_sec-tv6.tv_sec)*1000000+(tv7.tv_usec-tv6.tv_usec) << " us" << endl;
 cout << "rs_dl       " << (tv8.tv_sec-tv7.tv_sec)*1000000+(tv8.tv_usec-tv7.tv_usec) << " us" << endl;
 cout << "extract_tfg_and_tfoec_step     " << (tv9.tv_sec-tv8.tv_sec)*1000000+(tv9.tv_usec-tv8.tv_usec) << " us" << endl;
 cout << "decode_mib  " << (tv12.tv_sec-tv11.tv_sec)*1000000+(tv12.tv_usec-tv11.tv_usec) << " us" << endl;
