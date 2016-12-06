@@ -495,6 +495,496 @@ void xcorr_pss2(const cvec & capbuf,
     printf("xcorr_pss2 : %ld us\n", (tv2.tv_sec-tv1.tv_sec)*1000000+(tv2.tv_usec-tv1.tv_usec));
 }
 
+
+/*
+ *
+ *
+ */
+__global__ void sss_detect_getce_sss_kernel(cufftDoubleComplex *d_capbuf, int n_pss,
+                                            unsigned short n_id_2_est, int n_symb_dl, double peak_loc,
+                                            double fc_requested, double fc_programmed, double fs_programmed, double peak_freq,
+                                            // output
+                                            float *d_sss_h12_np_est, cufftDoubleComplex *d_sss_h12_nrm_est, cufftDoubleComplex *d_sss_h12_ext_est)
+{
+    __shared__ cufftDoubleComplex shift[128], *p_pss_fd;
+    __shared__ cufftComplex sss_h12_nrm_est[62 * 2], sss_h12_ext_est[62 * 2];
+    __shared__ float sss_h12_np_est[62 * 2];
+
+    const unsigned int tid = threadIdx.x;
+    const double k_factor = (fc_requested - peak_freq) / fc_programmed;
+    const unsigned int pss_dft_location = lround(peak_loc + tid * k_factor * 9600 + 9 - 2);
+    cufftDoubleComplex s_capbuf[128], h_raw[62], h_sm[62], acc;
+    double pss_np;
+    float real, imag;
+
+    double k = CUDART_PI * (-peak_freq) / ((fs_programmed * k_factor) / 2);
+
+    if (tid == 0) {
+        p_pss_fd = (cufftDoubleComplex *)&pss_fd[n_id_2_est];
+    }
+
+    for (unsigned int i = tid; i < 128; i += n_pss) {
+        shift[i].x = cos(k * i);
+        shift[i].y = sin(k * i);
+    }
+
+    for (unsigned int i = tid; i < 62 * 2; i += n_pss) {
+        sss_h12_np_est[i] = 0.0;
+        sss_h12_nrm_est[i].x = 0.0; sss_h12_nrm_est[i].y = 0.0;
+        sss_h12_ext_est[i].x = 0.0; sss_h12_ext_est[i].y = 0.0;
+    }
+
+    __syncthreads();
+
+    // implement extract_psss(capbuf.mid(pss_dft_location, 128), -cell_in.freq, k_factor, fs_programmed)
+    for (unsigned int t = pss_dft_location + 2, i = 2; i < 128; i++, t++) {
+        /* 128 points data shift, so k multiply from 0 to 125 */
+
+        s_capbuf[i - 2].x = COMPLEX_MUL_REAL(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].y = COMPLEX_MUL_IMAG(d_capbuf[t], shift[i]);
+    }
+
+    // time shift 2 points
+    s_capbuf[126].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location], shift[0]);
+    s_capbuf[126].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location], shift[0]);
+    s_capbuf[127].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location + 1], shift[1]);
+    s_capbuf[127].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location + 1], shift[1]);
+
+    kernel_fft_radix2(s_capbuf, 128);
+
+    // index   :  0,  1,       30, 31, 32, 33,    , 61
+    // dft_out : 97, 98, .... 127,  1,  2,  3, ..., 31
+    // pss_fd  :  0,  1, ....  30, 31, 32, 33, ..., 61
+
+    for (unsigned int i = 1; i <= 31; i++) {
+        // concat(dft_out.right(31), dft_out.mid(1,31)) * conj(pss_fd)
+
+        h_raw[i + 30].x = SQRT128_INV * (s_capbuf[i].x * p_pss_fd[i + 30].x + s_capbuf[i].y * p_pss_fd[i + 30].y);
+        h_raw[i + 30].y = SQRT128_INV * (s_capbuf[i].y * p_pss_fd[i + 30].x - s_capbuf[i].x * p_pss_fd[i + 30].y);
+
+        h_raw[i - 1].x = SQRT128_INV * (s_capbuf[i + 96].x * p_pss_fd[i - 1].x + s_capbuf[i + 96].y * p_pss_fd[i - 1].y);
+        h_raw[i - 1].y = SQRT128_INV * (s_capbuf[i + 96].y * p_pss_fd[i - 1].x - s_capbuf[i + 96].x * p_pss_fd[i - 1].y);
+    }
+
+    // Smoothing... Basic...
+
+    //                  t  = 0, 1, 2, 3,  4,  5,  6,  7,  8,  9, 10,        , 53, 54, 55, 56, 57, 58, 59, 60, 61
+    // lt  = MAX(0, t - 6) = 0, 0, 0, 0,  0,  0,  0,  1,  2,  3,  4, ...... , 47, 48, 49, 50, 51, 52, 53, 54, 55
+    // rt  = MIN(61,t + 6) = 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, ...... , 59, 60, 61, 61, 61, 61, 61, 61, 61
+    // len = rt-lt + 1     = 7, 8, 9,10, 11, 12, 13, 13, 13, 13, 13, ...... , 13, 13, 13, 12, 11, 10,  9,  8,  7
+
+    /* To be optimized in future */
+
+    acc.x = 0.0; acc.y = 0.0;
+    for (unsigned int i = 0; i < 6; i++) {
+        acc.x += h_raw[i].x;
+        acc.y += h_raw[i].y;
+    }
+
+    for (unsigned int i = 0; i <= 6; i++) {
+        acc.x += h_raw[i + 6].x;
+        acc.y += h_raw[i + 6].y;
+
+        h_sm[i].x = acc.x / (i + 7);
+        h_sm[i].y = acc.y / (i + 7);
+    }
+
+    for (unsigned int i = 7; i <= 55; i++) {
+        acc.x += (h_raw[i + 6].x - h_raw[i - 7].x);
+        acc.y += (h_raw[i + 6].y - h_raw[i - 7].y);
+
+        h_sm[i].x = acc.x / 13;
+        h_sm[i].y = acc.y / 13;
+    }
+
+    for (unsigned int i = 56; i < 62; i++) {
+        acc.x -= h_raw[i - 7].x;
+        acc.y -= h_raw[i - 7].y;
+
+        h_sm[i].x = acc.x / (61 + 7 - i);
+        h_sm[i].y = acc.y / (61 + 7 - i);
+    }
+
+    // Estimate noise power.
+    // pss_np = sigpower(h_sm.get_row(tid) - h_raw_fo_pss.get_row(tid));
+    pss_np = 0.0;
+    for (unsigned int i = 0; i < 62; i++) {
+        double noise_r = h_sm[i].x - h_raw[i].x;
+        double noise_i = h_sm[i].y - h_raw[i].y;
+        pss_np += (noise_r * noise_r + noise_i * noise_i);
+    }
+
+    pss_np = pss_np / 62.0;
+
+    __syncthreads();
+
+    //  vec pss_np_inv_h1 = 1.0 / pss_np(itpp_ext::matlab_range(0, 2, n_pss - 1));
+    //  vec pss_np_inv_h2 = 1.0 / pss_np(itpp_ext::matlab_range(1, 2, n_pss - 1));
+    //
+    //  for (uint8 t = 0; t < 62; t++) {
+    //
+    //      // First half (h1) and second half (h2) channel estimates.
+    // 
+    //      cvec h_sm_h1 = h_sm.get_col(t).get(itpp_ext::matlab_range(0, 2, n_pss - 1));
+    //      cvec h_sm_h2 = h_sm.get_col(t).get(itpp_ext::matlab_range(1, 2, n_pss - 1));
+    //
+    //      sum(elem_mult(sqr(h_sm_h1), pss_np_inv_h1))
+    //      sum(elem_mult(sqr(h_sm_h2), pss_np_inv_h2))
+    //
+    //      ....
+    //  }
+
+    for (unsigned int i = 0, col = (tid & 1) * 62; i < 62; i++, col++) {
+         float sss_np_est_value;
+
+         sss_np_est_value = ((h_sm[i].x * h_sm[i].x) + (h_sm[i].y * h_sm[i].y)) / pss_np;
+         atomicAdd(&sss_h12_np_est[col], sss_np_est_value);
+    }
+
+    __syncthreads();
+
+    //  Implement the following expressions :
+    //
+    //  sss_h1_np_est(t) = 1 / (1 + sum(elem_mult(sqr(h_sm_h1), pss_np_inv_h1)));
+    //  sss_h2_np_est(t) = 1 / (1 + sum(elem_mult(sqr(h_sm_h2), pss_np_inv_h2)));
+
+    for (unsigned int i = tid; i < 62 * 2; i += n_pss) {
+        sss_h12_np_est[i] = 1.0 / (1.0 + sss_h12_np_est[i]);
+    }
+
+    __syncthreads();
+
+    // implment : extract_psss(capbuf.mid(ext_sss_dft_location,128),-peak_freq,k_factor,fs_programmed)
+
+    //  index   :  0,  1,       30, 31, 32, 33,    , 61
+    //  dft_out : 97, 98, .... 127,  1,  2,  3, ..., 31
+
+    const unsigned int ext_sss_dft_location = pss_dft_location - 128 - 32;
+    for (unsigned int t = ext_sss_dft_location + 2, i = 2; i < 128; i++, t++) {
+        /* 128 points data shift, so k multiply from 0 to 125 */
+
+        s_capbuf[i - 2].x = COMPLEX_MUL_REAL(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].y = COMPLEX_MUL_IMAG(d_capbuf[t], shift[i]);
+    }
+
+    // time shift 2 points
+    s_capbuf[126].x = COMPLEX_MUL_REAL(d_capbuf[ext_sss_dft_location], shift[0]);
+    s_capbuf[126].y = COMPLEX_MUL_IMAG(d_capbuf[ext_sss_dft_location], shift[0]);
+    s_capbuf[127].x = COMPLEX_MUL_REAL(d_capbuf[ext_sss_dft_location + 1], shift[1]);
+    s_capbuf[127].y = COMPLEX_MUL_IMAG(d_capbuf[ext_sss_dft_location + 1], shift[1]);
+
+    kernel_fft_radix2(s_capbuf, 128);
+
+    //  index   :  0,  1,       30, 31, 32, 33,    , 61
+    //  dft_out : 97, 98, .... 127,  1,  2,  3, ..., 31
+    //
+    //  vec pss_np_inv_h1 = 1.0 / pss_np(itpp_ext::matlab_range(0,2,n_pss-1));
+    //  vec pss_np_inv_h2 = 1.0 / pss_np(itpp_ext::matlab_range(1,2,n_pss-1));
+    //
+    //  for (uint8 t = 0; t < 62; t++) {
+    //
+    //      sss_h1_np_est(t) = 1 / (1 + sum(elem_mult(sqr(h_sm_h1), pss_np_inv_h1)));
+    //      sss_h2_np_est(t) = 1 / (1 + sum(elem_mult(sqr(h_sm_h2), pss_np_inv_h2)));
+    //
+    //      ...
+    //      sss_h1_ext_est(t) = sss_h1_np_est(t) * sum(elem_mult(conj(h_sm_h1), to_cvec(pss_np_inv_h1), sss_ext_raw.get_col(t).get(itpp_ext::matlab_range(0,2,n_pss-1))));
+    //      sss_h2_ext_est(t) = sss_h2_np_est(t) * sum(elem_mult(conj(h_sm_h2), to_cvec(pss_np_inv_h2), sss_ext_raw.get_col(t).get(itpp_ext::matlab_range(1,2,n_pss-1))));
+    //  }
+
+    const double pss_np_inv_SQRT128_INV = (1 / pss_np) * SQRT128_INV;
+
+    for (unsigned int i = 0, col = (tid & 1) * 62; i < 31; i++, col++) {
+
+         real = imag = sss_h12_np_est[col] * pss_np_inv_SQRT128_INV;
+
+         real *= (h_sm[i].x * s_capbuf[97 + i].x + h_sm[i].y * s_capbuf[97 + i].y);
+         imag *= (h_sm[i].x * s_capbuf[97 + i].y - h_sm[i].y * s_capbuf[97 + i].x);
+
+         atomicAdd(&sss_h12_ext_est[col].x, real);
+         atomicAdd(&sss_h12_ext_est[col].y, imag);
+
+         real = imag = sss_h12_np_est[col + 31] * pss_np_inv_SQRT128_INV;
+
+         real *= (h_sm[i + 31].x * s_capbuf[1 + i].x + h_sm[i + 31].y * s_capbuf[1 + i].y);
+         imag *= (h_sm[i + 31].x * s_capbuf[1 + i].y - h_sm[i + 31].y * s_capbuf[1 + i].x);
+
+         atomicAdd(&sss_h12_ext_est[col + 31].x, real);
+         atomicAdd(&sss_h12_ext_est[col + 31].y, imag);
+    }
+
+    __syncthreads();
+
+    // implment : extract_psss(capbuf.mid(nrm_sss_dft_location,128),-peak_freq,k_factor,fs_programmed)
+
+    const unsigned int nrm_sss_dft_location = pss_dft_location - 128 - 9;
+    for (unsigned int t = nrm_sss_dft_location + 2, i = 2; i < 128; i++, t++) {
+        s_capbuf[i - 2].x = COMPLEX_MUL_REAL(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].y = COMPLEX_MUL_IMAG(d_capbuf[t], shift[i]);
+    }
+
+    // time shift 2 points
+    s_capbuf[126].x = COMPLEX_MUL_REAL(d_capbuf[nrm_sss_dft_location], shift[0]);
+    s_capbuf[126].y = COMPLEX_MUL_IMAG(d_capbuf[nrm_sss_dft_location], shift[0]);
+    s_capbuf[127].x = COMPLEX_MUL_REAL(d_capbuf[nrm_sss_dft_location + 1], shift[1]);
+    s_capbuf[127].y = COMPLEX_MUL_IMAG(d_capbuf[nrm_sss_dft_location + 1], shift[1]);
+
+    kernel_fft_radix2(s_capbuf, 128);
+
+    // sss_h1_nrm_est(t) = sss_h1_np_est(t)*sum(elem_mult(conj(h_sm_h1), to_cvec(pss_np_inv_h1), sss_nrm_raw.get_col(t).get(itpp_ext::matlab_range(0,2,n_pss-1))));
+    // sss_h2_nrm_est(t) = sss_h2_np_est(t)*sum(elem_mult(conj(h_sm_h2), to_cvec(pss_np_inv_h2), sss_nrm_raw.get_col(t).get(itpp_ext::matlab_range(1,2,n_pss-1))));
+
+    for (unsigned int i = 0, col = (tid & 1) * 62; i < 31; i++, col++) {
+
+         real = imag = sss_h12_np_est[col] * pss_np_inv_SQRT128_INV;
+
+         real *= (h_sm[i].x * s_capbuf[97 + i].x + h_sm[i].y * s_capbuf[97 + i].y);
+         imag *= (h_sm[i].x * s_capbuf[97 + i].y - h_sm[i].y * s_capbuf[97 + i].x);
+
+         atomicAdd(&sss_h12_nrm_est[col].x, real);
+         atomicAdd(&sss_h12_nrm_est[col].y, imag);
+
+         real = imag = sss_h12_np_est[col + 31] * pss_np_inv_SQRT128_INV;
+
+         real *= (h_sm[i + 31].x * s_capbuf[1 + i].x + h_sm[i + 31].y * s_capbuf[1 + i].y);
+         imag *= (h_sm[i + 31].x * s_capbuf[1 + i].y - h_sm[i + 31].y * s_capbuf[1 + i].x);
+
+         atomicAdd(&sss_h12_nrm_est[col + 31].x, real);
+         atomicAdd(&sss_h12_nrm_est[col + 31].y, imag);
+    }
+
+    /* perhaps in the future, we can combine sss_detect_ml_kernel() into this one */
+    for (unsigned int i = tid; i < 62 * 2; i += n_pss) {
+        d_sss_h12_np_est[i]  = sss_h12_np_est[i];
+        d_sss_h12_ext_est[i].x = sss_h12_ext_est[i].x;
+        d_sss_h12_ext_est[i].y = sss_h12_ext_est[i].y;
+    }
+
+    __syncthreads();
+
+    for (unsigned int i = tid; i < 62 * 2; i += n_pss) {
+        d_sss_h12_nrm_est[i].x = sss_h12_nrm_est[i].x;
+        d_sss_h12_nrm_est[i].y = sss_h12_nrm_est[i].y;
+    }
+}
+
+
+__device__ void sss_detect_ml_helper_function(float *sss_np_est, cufftDoubleComplex *sss_est, int *sss_try_orig,
+                                              /* output */
+                                              double *log_lik)
+{
+    __shared__ cufftDoubleComplex buffer1[124], coeff;
+    __shared__ double buffer2[124];
+
+    const unsigned int tid = threadIdx.x;
+    double real, imag, r;
+
+    /* elem_mult(conj(sss_h12_est), sss_h12_try) */
+    buffer1[tid].x =   sss_est[tid].x * sss_try_orig[tid];
+    buffer1[tid].y = - sss_est[tid].y * sss_try_orig[tid];
+    
+    __syncthreads();
+
+    for (int s = 128 / 2; s > 0; s >>= 1) {
+        if ((tid < s) && (tid + s < 124)) {
+            buffer1[tid].x += buffer1[tid + s].x;
+            buffer1[tid].y += buffer1[tid + s].y;
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        real = buffer1[0].x; imag = buffer1[0].y;
+        r = sqrt(real * real + imag * imag);
+        coeff.x =  real / r;
+        coeff.y = -imag / r;
+    }
+
+    __syncthreads();
+
+    real = sss_try_orig[tid] * coeff.x - sss_est[tid].x;
+    imag = sss_try_orig[tid] * coeff.y - sss_est[tid].y;
+    buffer2[tid] = - (real * real + imag * imag) / sss_np_est[tid];
+
+    __syncthreads();
+
+    for (unsigned int s = 128 / 2; s > 0; s >>= 1) {
+        if ((tid < s) && (tid + s < 124)) {
+            buffer2[tid] += buffer2[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        *log_lik = buffer2[0];
+    }
+}
+
+__global__ void sss_detect_ml_kernel(float *d_sss_h12_np_est, cufftDoubleComplex *d_sss_h12_nrm_est, cufftDoubleComplex *d_sss_h12_ext_est,
+                                     int n_id_2,
+                                     // output
+                                     double *d_log_lik_nrm, double *d_log_lik_ext)
+{
+    __shared__ float sss_h12_np_est[124];
+    __shared__ int sss_h12_try[124], sss_h21_try[124], *sss_try;
+    __shared__ cufftDoubleComplex sss_h12_nrm_est[124], sss_h12_ext_est[124], *sss_h12_est;
+    __shared__ unsigned int word12[4], word21[4];
+    __shared__ double *d_log_lik;
+
+    const unsigned int bid = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+
+    if (tid == 0) {
+        const int bid_mod4 = bid % 4;
+        const int bid_div4 = bid / 4;
+
+        word12[0] = word21[2] = sss_fd[bid_div4][n_id_2][0][0];
+        word12[1] = word21[3] = sss_fd[bid_div4][n_id_2][0][1];
+
+        word12[2] = word21[0] = sss_fd[bid_div4][n_id_2][1][0];
+        word12[3] = word21[1] = sss_fd[bid_div4][n_id_2][1][1];
+
+        // sss_detect_ml_helper_function(sss_h12_np_est, sss_h12_nrm_est, sss_h12_try, &d_log_lik_nrm[bid * 2 + 0]);
+        // sss_detect_ml_helper_function(sss_h12_np_est, sss_h12_nrm_est, sss_h21_try, &d_log_lik_nrm[bid * 2 + 1]);
+        // sss_detect_ml_helper_function(sss_h12_np_est, sss_h12_ext_est, sss_h12_try, &d_log_lik_ext[bid * 2 + 0]);
+        // sss_detect_ml_helper_function(sss_h12_np_est, sss_h12_ext_est, sss_h21_try, &d_log_lik_ext[bid * 2 + 1]);
+
+        sss_h12_est = (bid_mod4 / 2) ? sss_h12_ext_est : sss_h12_nrm_est;
+        sss_try = (bid_mod4 & 1) ? sss_h21_try : sss_h12_try;
+        d_log_lik = (bid_mod4 / 2) ? &d_log_lik_ext[(bid_mod4 & 1) * 168 + bid_div4] : &d_log_lik_nrm[(bid_mod4 & 1) * 168 + bid_div4]; 
+    }
+
+    __syncthreads();
+
+    sss_h12_np_est[tid] = d_sss_h12_np_est[tid];
+    sss_h12_nrm_est[tid].x = d_sss_h12_nrm_est[tid].x;
+    sss_h12_nrm_est[tid].y = d_sss_h12_nrm_est[tid].y;
+    sss_h12_ext_est[tid].x = d_sss_h12_ext_est[tid].x;
+    sss_h12_ext_est[tid].y = d_sss_h12_ext_est[tid].y;
+
+    /* to_cvec(sss_h12_try_orig) and to_cvec(sss_h21_try_orig) */
+    /* tid = 0...30, 31...61, 62...92, 93...123 */
+
+    sss_h12_try[tid] = 1 - 2 * ((word12[tid / 31] >> (tid % 31)) & 1);
+    sss_h21_try[tid] = 1 - 2 * ((word21[tid / 31] >> (tid % 31)) & 1);
+
+    __syncthreads();
+
+    sss_detect_ml_helper_function(sss_h12_np_est, sss_h12_est, sss_try, d_log_lik);
+}
+
+
+__device__ void log_lik_maximum(double *d_in, double *d_max, int *d_idx)
+{
+    __shared__ double shared[168 * 4];
+    __shared__ int index[168 * 4];
+
+    const unsigned int tid = threadIdx.x;
+    const unsigned int tid_mod168 = tid % 168;
+    const unsigned int tid_div168 = tid / 168;
+
+    shared[tid] = d_in[tid];
+    index[tid] = tid_mod168;
+
+    __syncthreads();
+
+    for (unsigned int s = 256 / 2; s > 0; s >>= 1) {
+         if ((tid_mod168 < s) && (tid_mod168 + s < 168)) {
+             if (shared[tid] < shared[tid + s]) {
+                 double value;
+                 value = shared[tid];
+                 shared[tid] = shared[tid + s];
+                 shared[tid + s] = value;
+
+                 int idx;
+                 idx = index[tid];
+                 index[tid] = index[tid + s];
+                 index[tid + s] = idx;
+             }
+         }
+         __syncthreads();
+    }
+
+    if (tid_mod168 == 0) {
+        d_max[tid_div168] = shared[tid_div168 * 168];
+        d_idx[tid_div168] = index[tid_div168 * 168];
+    }
+}
+
+
+__device__ void log_lik_mean_var(double *d_in, double *d_mean, double *d_var)
+{
+    __shared__ double shared[168 * 4], shared_sqr[168 * 4];
+    const unsigned int tid = threadIdx.x;
+    double mean;
+
+    shared[tid] = d_in[tid];
+    shared_sqr[tid] = d_in[tid] * d_in[tid];
+
+    __syncthreads();
+
+    for (unsigned int s = 1024 / 2; s > 0; s >>= 1) {
+        if ((tid < s) && (tid + s < 168 * 4)) {
+             shared[tid] += shared[tid + s];
+             shared_sqr[tid] += shared_sqr[tid + s];
+        }
+        __syncthreads();
+    }
+
+    mean = shared[0] / (168 * 4);
+
+    if (tid == 0) {
+        *d_mean = mean;
+        *d_var = (shared_sqr[tid] / (168 * 4)) - mean * mean;
+    }
+}
+
+
+__global__ void sss_detect_ml_decision_kernel(double *d_log_lik, int thresh2_n_sigma, int ind,
+                                              double fc_requested, double fc_programmed, double fs_programmed, double freq,
+                                              // output
+                                              int *d_n_id_1_est, double *d_frame_start, int *d_cp_type)
+{
+    __shared__ double log_lik_max[4], log_lik_mean, log_lik_var;
+    __shared__ int log_lik_idx[4];
+ 
+    const unsigned int tid = threadIdx.x;
+
+    log_lik_maximum(&d_log_lik[0], &log_lik_max[0], &log_lik_idx[0]);
+    __syncthreads();
+
+    log_lik_mean_var(&d_log_lik[0], &log_lik_mean, &log_lik_var);
+    __syncthreads(); 
+
+    if (tid == 0) {
+        double max_value = log_lik_max[0];
+        int max_idx = 0;
+
+        for (int i = 1; i <= 3; i++) {
+            if (log_lik_max[i] > max_value) {
+                max_value = log_lik_max[i];
+                max_idx = i;
+            }
+        }
+
+        *d_n_id_1_est = -1;
+
+        const double k_factor = (fc_requested - freq) / fc_programmed;
+        double frame_start = ind + (128 + 9 - 960 - 2) * 16 / FS_LTE * fs_programmed * k_factor;
+        if (max_idx & 1)
+            frame_start = frame_start + 9600 * k_factor * 16 / FS_LTE * fs_programmed * k_factor;
+
+#undef WRAP
+#define WRAP(x,sm,lg) (fmod((x)-(sm),(lg)-(sm))+(sm))
+        frame_start = WRAP(frame_start, -0.5, (2*9600.0-0.5)*16/FS_LTE*fs_programmed*k_factor);
+
+        if (max_value < log_lik_mean + sqrt(log_lik_var) * thresh2_n_sigma)
+            return;
+        *d_cp_type = (max_idx / 2) ? 2 /* extend cp */ : 1 /* normal cp */;
+        *d_n_id_1_est = log_lik_idx[max_idx];
+        *d_frame_start = frame_start;
+    }
+}
+
 // Perform FOE using only the PSS and SSS.
 // The PSS correlation peak gives us the frequency offset within 2.5kHz.
 // The PSS/SSS can be used to estimate the frequency offset within a
@@ -507,10 +997,10 @@ __global__ void pss_sss_foe_kernel(cufftDoubleComplex *d_capbuf, int n_sss,
                                    double *d_adjust_f)
 {
     __shared__ float M_real, M_imag;
-    __shared__ cufftDoubleComplex shift[128], coeff;
+    __shared__ cufftDoubleComplex shift[128], coeff, *p_pss_fd;
     cufftDoubleComplex s_capbuf[128];
     cufftDoubleComplex h_raw_fo_pss[62], h_sm[62];
-    cufftDoubleComplex *p_pss_fd, acc, M;
+    cufftDoubleComplex acc, M;
     unsigned int *p_sss_fd;
 
     const double k_factor = (fc_requested - freq) / fc_programmed;
@@ -533,9 +1023,10 @@ __global__ void pss_sss_foe_kernel(cufftDoubleComplex *d_capbuf, int n_sss,
 
         coeff.x = cos(CUDART_PI * freq / (FS_LTE / 16 / 2) * pss_sss_dist);
         coeff.y = sin(CUDART_PI * freq / (FS_LTE / 16 / 2) * pss_sss_dist);
+
+        p_pss_fd = (cufftDoubleComplex *)&pss_fd[n_id_2];
     }
 
-    p_pss_fd = (cufftDoubleComplex *)&pss_fd[n_id_2];
     p_sss_fd = (unsigned int *)&sss_fd[n_id_1][n_id_2][(tid + sn) & 1];
 
     double k = CUDART_PI * (-freq) / ((fs_programmed * k_factor) / 2);
@@ -1116,6 +1607,7 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
         toe2.x = 0.0; toe2.y = 0.0;
         r2v_prev.x = 0.0; r2v_prev.y = 0.0;
 
+#undef SWAP
 #define SWAP(x,y) \
     do { (tmp) = (x); (x) = (y); (y) = (tmp); \
     } while(0)
@@ -1214,6 +1706,8 @@ extern "C" Cell extract_tfg_and_tfoec(
     // Output
     cmat & my_tfg_comp)
 {
+    struct timeval tv1, tv2;
+
     const double frame_start = cell.frame_start;
     const int n_symb_dl = cell.n_symb_dl();
     const int n_ofdm_sym = (6*10*2+2)*n_symb_dl;
@@ -1226,6 +1720,10 @@ extern "C" Cell extract_tfg_and_tfoec(
     double h_residual_f, *d_residual_f = (double *)NULL;
     double h_adjust_f, *d_adjust_f = (double *)NULL;
     double *d_tfg_timestamp = (double *)NULL;
+    float *d_sss_h12_np_est = (float *)NULL;
+    cufftDoubleComplex *d_sss_h12_nrm_est = (cufftDoubleComplex *)NULL, *d_sss_h12_ext_est = (cufftDoubleComplex *)NULL;
+    double *d_log_lik = (double *)NULL, *d_frame_start = (double *)NULL;
+    int *d_n_id_1_est = (int *)NULL, *d_cp_type = (int *)NULL;
 
     h_capbuf = (cufftDoubleComplex *)malloc(n_cap * sizeof(cufftDoubleComplex));
     h_tfg = (cufftDoubleComplex *)malloc(n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex));
@@ -1237,15 +1735,54 @@ extern "C" Cell extract_tfg_and_tfoec(
     checkCudaErrors(cudaMalloc(&d_residual_f, sizeof(double)));
     checkCudaErrors(cudaMalloc(&d_tfg_timestamp, n_ofdm_sym * sizeof(double)));
 
+    checkCudaErrors(cudaMalloc(&d_sss_h12_np_est, 62 * 2 * sizeof(float)));
+    checkCudaErrors(cudaMalloc(&d_sss_h12_nrm_est, 62 * 2 * sizeof(cufftDoubleComplex)));
+    checkCudaErrors(cudaMalloc(&d_sss_h12_ext_est, 62 * 2 * sizeof(cufftDoubleComplex)));
+ 
+    checkCudaErrors(cudaMalloc(&d_log_lik, 168 * 2 * 2 * sizeof(double)));
+
+    checkCudaErrors(cudaMalloc(&d_n_id_1_est, sizeof(int)));
+    checkCudaErrors(cudaMalloc(&d_cp_type, sizeof(int)));
+    checkCudaErrors(cudaMalloc(&d_frame_start, sizeof(double)));
+
     for (unsigned int i = 0; i < n_cap; i++) {
         h_capbuf[i].x = capbuf_raw[i].real();
         h_capbuf[i].y = capbuf_raw[i].imag();
     }
     checkCudaErrors(cudaMemcpy(d_capbuf, h_capbuf, n_cap * sizeof(cufftDoubleComplex), cudaMemcpyHostToDevice));
 
+    /* prologue of function sss_detect() of searcher.cpp */
+
+    const double peak_freq = cell.freq;
+    double k_factor = (fc_requested - peak_freq) / fc_programmed; 
+    double peak_loc = (cell.ind + 9 < 162 ? cell.ind + 9600 * k_factor : cell.ind);
+    const unsigned int n_id_2_est = cell.n_id_2;
+    const int n_pss = ceil((n_cap - 125 - 9 - peak_loc) / (k_factor * 9600));
+
+    gettimeofday(&tv1, NULL);
+    sss_detect_getce_sss_kernel<<<1, n_pss>>>(d_capbuf, n_pss,
+                                              n_id_2_est, n_symb_dl, peak_loc,
+                                              fc_requested, fc_programmed, fs_programmed, peak_freq,
+                                              // output
+                                              d_sss_h12_np_est, d_sss_h12_nrm_est, d_sss_h12_ext_est);
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    sss_detect_ml_kernel<<<168*4, 124>>>(d_sss_h12_np_est, d_sss_h12_nrm_est, d_sss_h12_ext_est, n_id_2_est,
+                                         &d_log_lik[0], &d_log_lik[168 * 2]);
+    checkCudaErrors(cudaDeviceSynchronize());
+
+#define THRESH2_N_SIGMA 3
+    sss_detect_ml_decision_kernel<<<1, 168*4>>>(&d_log_lik[0], THRESH2_N_SIGMA, cell.ind,
+                                                fc_requested, fc_programmed, fs_programmed, peak_freq,
+                                                // output
+                                                d_n_id_1_est, d_frame_start, d_cp_type);
+    checkCudaErrors(cudaDeviceSynchronize());
+    gettimeofday(&tv2, NULL);
+    printf("device sss_detect : %ld us\n", (tv2.tv_sec-tv1.tv_sec)*1000000+(tv2.tv_usec-tv1.tv_usec));
+
     /* prologue of function pss_sss_foe() of searcher.cpp */
 
-    double k_factor = (fc_requested - cell.freq) / fc_programmed;
+    k_factor = (fc_requested - cell.freq) / fc_programmed;
     const unsigned int pss_sss_dist = lround((128 + (n_symb_dl == 7 ? 9 : 32)) * 16 / FS_LTE * fs_programmed * k_factor);
     double first_sss_dft_location = frame_start + (960 - 128 - (n_symb_dl == 7 ? 9 : 32)-128) * 16 / FS_LTE * fs_programmed * k_factor;
     const int n_sss = ceil((n_cap - 127 - pss_sss_dist - 100) / (9600 * 16 / FS_LTE * fs_programmed * k_factor));
@@ -1295,11 +1832,16 @@ extern "C" Cell extract_tfg_and_tfoec(
     checkCudaErrors(cudaFree(d_adjust_f));
     checkCudaErrors(cudaFree(d_residual_f));
     checkCudaErrors(cudaFree(d_tfg_timestamp));
+    checkCudaErrors(cudaFree(d_sss_h12_np_est));
+    checkCudaErrors(cudaFree(d_sss_h12_nrm_est));
+    checkCudaErrors(cudaFree(d_sss_h12_ext_est));
+    checkCudaErrors(cudaFree(d_frame_start));
+    checkCudaErrors(cudaFree(d_n_id_1_est));
+    checkCudaErrors(cudaFree(d_cp_type));
 
     Cell cell_out(cell);
     cell_out.freq_fine = cell_out.freq + h_adjust_f;
     cell_out.freq_superfine = cell_out.freq_fine + h_residual_f;
     return cell_out;
 }
-
 
