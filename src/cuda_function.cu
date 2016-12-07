@@ -1426,9 +1426,86 @@ __device__ void kernel_fft_radix2(cufftDoubleComplex *c_io, int N)
 }
 
 
-__global__ void extract_tfg_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d_tfg, cufftDoubleComplex *d_rs_extracted, double *d_tfg_timestamp, double *d_adjust_f,
-                                   unsigned short n_id_cell, int n_symb_dl, double frame_start,
-                                   double fc_requested, double fc_programmed, double fs_programmed, double freq)
+
+/*
+ *
+ */
+__global__ void extract_tfg_multiblocks_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d_tfg, double *d_tfg_timestamp, double *d_adjust_f,
+                                               unsigned short n_id_cell, int n_symb_dl, double frame_start,
+                                               double fc_requested, double fc_programmed, double fs_programmed, double freq)
+{
+    __shared__ cufftDoubleComplex s_capbuf[128];
+
+    const unsigned int tid = threadIdx.x;
+    const unsigned int bid = blockIdx.x;
+
+    int dft_location_i;
+    double freq_fine = freq + *d_adjust_f;
+    const double k_factor = (fc_requested - freq_fine) / fc_programmed;
+    double dft_location = frame_start + ((n_symb_dl == 6) ? 32 : 10) * 16 / FS_LTE * fs_programmed * k_factor;
+    cufftDoubleComplex shift, coeff;
+
+    if (dft_location - .01 * fs_programmed * k_factor > -0.5) {
+        dft_location = dft_location - .01 * fs_programmed * k_factor;
+    }
+
+    dft_location += ((bid / n_symb_dl) * 960 + (bid % n_symb_dl) * (n_symb_dl == 6 ? 160 : 137))  * 16 / FS_LTE * fs_programmed * k_factor;
+    dft_location_i = lround(dft_location);
+
+    // cvec capbuf = fshift(capbuf_raw, -freq_fine, fs_programmed * k_factor);
+    double k = CUDART_PI * (-freq_fine) / (fs_programmed * k_factor / 2);
+
+    shift.x = cos(k * (dft_location_i + tid));
+    shift.y = sin(k * (dft_location_i + tid));
+
+    s_capbuf[tid].x = COMPLEX_MUL_REAL(d_capbuf[dft_location_i + tid], shift);
+    s_capbuf[tid].y = COMPLEX_MUL_IMAG(d_capbuf[dft_location_i + tid], shift);
+
+    __syncthreads();
+
+    // DFT of 128 points
+    // cvec dft_out = dft(capbuf.mid(round_i(dft_location), 128));
+
+    if (tid == 0) {
+        d_tfg_timestamp[bid] = dft_location;
+
+        kernel_fft_radix2(s_capbuf, 128);
+    }
+
+    __syncthreads();
+
+    //  92,  93,  94, ... , 127,  1,  2,  3, ..., 36 -> concat(dft_out.right(36), dft_out.mid(1, 36))
+    //   0,   1,   2,     ,  35, 36, 37, 38,    , 71
+    // -36, -35, -34, ... ,  -1,  1,  2,  3, .... 36
+
+    // concat(dft_out.right(36), dft_out.mid(1,36));
+    // exp((-J * 2 * pi * late / 128) * cn)
+
+    double late = dft_location_i - dft_location;
+
+    if (tid < 36) {
+        coeff.x =  cos(2 * CUDART_PI * late * (36 - tid) / 128);
+        coeff.y =  sin(2 * CUDART_PI * late * (36 - tid) / 128);
+
+        d_tfg[bid * 72 + tid].x = SQRT128_INV * COMPLEX_MUL_REAL(s_capbuf[tid + 92], coeff);
+        d_tfg[bid * 72 + tid].y = SQRT128_INV * COMPLEX_MUL_IMAG(s_capbuf[tid + 92], coeff);
+    } else if (tid < 72) {
+        coeff.x =  cos(2 * CUDART_PI * late * (tid - 35) / 128);
+        coeff.y = -sin(2 * CUDART_PI * late * (tid - 35) / 128);
+
+        d_tfg[bid * 72 + tid].x = SQRT128_INV * COMPLEX_MUL_REAL(s_capbuf[tid - 35], coeff);
+        d_tfg[bid * 72 + tid].y = SQRT128_INV * COMPLEX_MUL_IMAG(s_capbuf[tid - 35], coeff);
+    }
+}
+
+
+
+/*
+ *
+ */
+__global__ void extract_tfg_singleblock_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d_tfg, double *d_tfg_timestamp, double *d_adjust_f,
+                                               unsigned short n_id_cell, int n_symb_dl, double frame_start,
+                                               double fc_requested, double fc_programmed, double fs_programmed, double freq)
 {
     const unsigned int tid = threadIdx.x;
 
@@ -1839,9 +1916,9 @@ extern "C" Cell extract_tfg_and_tfoec(
                                      d_adjust_f);
     checkCudaErrors(cudaDeviceSynchronize());
 
-    extract_tfg_kernel<<<1, n_ofdm_sym>>>(d_capbuf, d_tfg, d_rs_extracted, d_tfg_timestamp, d_adjust_f,
-                                          n_id_cell, n_symb_dl, frame_start,
-                                          fc_requested, fc_programmed, fs_programmed, cell.freq);
+    extract_tfg_multiblocks_kernel<<<n_ofdm_sym, 128>>>(d_capbuf, d_tfg, d_tfg_timestamp, d_adjust_f,
+                                                        n_id_cell, n_symb_dl, frame_start,
+                                                        fc_requested, fc_programmed, fs_programmed, cell.freq);
     checkCudaErrors(cudaDeviceSynchronize());
 
     tfoec_kernel<<<1, n_ofdm_sym>>>(d_capbuf, d_tfg, d_rs_extracted, d_tfg_timestamp,
