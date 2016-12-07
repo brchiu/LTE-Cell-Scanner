@@ -189,6 +189,10 @@ extern "C" void generate_twiddle_factor(int N)
 }
 
 
+/*
+ * Calculate angle of complex number with real and imag.
+ */
+
 __device__ double angle(float real, float imag)
 {
     if (real > 0.0) {
@@ -212,10 +216,13 @@ __device__ double angle(float real, float imag)
 #define COMPLEX_MUL_REAL(a, b)  ((a).x * (b).x - (a).y * (b).y)
 #define COMPLEX_MUL_IMAG(a, b)  ((a).x * (b).y + (a).y * (b).x)
 
-__global__ void xc_correlate_kernel(cufftDoubleComplex *d_capbuf, double *d_xc_sqr,
-                                    double *d_xc_incoherent_single, double *d_xc_incoherent,
-                                    unsigned int n_cap, uint8 ds_comb_arm,
-                                    unsigned int t, double f, double fs)
+
+
+/*
+ *  Step 1 of xc_correlate()
+ */
+__global__ void xc_correlate_step1_kernel(cufftDoubleComplex *d_capbuf, double *d_xc_sqr,
+                                          unsigned int n_cap, unsigned int t, double f, double fs)
 {
     __shared__ cufftDoubleComplex s_fshift_pss[256], s_capbuf[256 + 137];
 
@@ -225,10 +232,7 @@ __global__ void xc_correlate_kernel(cufftDoubleComplex *d_capbuf, double *d_xc_s
     double shift = k * tid;
     double x1 = cos(shift), y1 = sin(shift);
     double x2 = pss_td[t][tid].x, y2 = pss_td[t][tid].y;
-    unsigned int max_m = (n_cap - 100 - 136) / 9600;
-    unsigned int i, m, index = 0;
     double real, imag;
-    double xc_incoherent_single_val = 0.0, xc_incoherent_value = 0.0;
 
     s_fshift_pss[tid].x = x1*x2 - y1*y2;
     s_fshift_pss[tid].y = -x1*y2 - x2*y1;
@@ -247,42 +251,69 @@ __global__ void xc_correlate_kernel(cufftDoubleComplex *d_capbuf, double *d_xc_s
 
     real = COMPLEX_MUL_REAL(s_fshift_pss[0], s_capbuf[tid]);
     imag = COMPLEX_MUL_IMAG(s_fshift_pss[0], s_capbuf[tid]);
-    for (i = 1; i < 137; i++) {
+    for (unsigned int i = 1; i < 137; i++) {
         real += COMPLEX_MUL_REAL(s_fshift_pss[i], s_capbuf[tid + i]);
         imag += COMPLEX_MUL_IMAG(s_fshift_pss[i], s_capbuf[tid + i]);
     }
     d_xc_sqr[256 * bid + tid] = (real * real + imag * imag) / (137.0*137.0);
-
-    __syncthreads();
-
-    if (tid < 16) {
-        index = 16 * bid + tid;
-        xc_incoherent_single_val = d_xc_sqr[index];
-        for (m = 1; m < max_m; m++) {
-            unsigned int span = m * 0.005 * fs;
-            xc_incoherent_single_val += d_xc_sqr[index + span];
-        }
-        xc_incoherent_value = d_xc_incoherent_single[index] = xc_incoherent_single_val / max_m;
-    }
-
-    __syncthreads();
-
-    if (tid < 16) {
-        for (i = 1; i <= ds_comb_arm; i++) {
-            if (index + i < 9600) {
-                xc_incoherent_value += d_xc_incoherent_single[index + i];
-            } else {
-                xc_incoherent_value += d_xc_incoherent_single[index + i - 9600];
-            }
-            if (index > i) {
-                xc_incoherent_value += d_xc_incoherent_single[index - i];
-            } else {
-                xc_incoherent_value += d_xc_incoherent_single[index - i + 9600];
-            }
-        }
-        d_xc_incoherent[index] = xc_incoherent_value / (ds_comb_arm * 2 + 1);
-    }
 }
+
+
+
+/*
+ * Step 2 of xc_correlate()
+ */
+__global__ void xc_correlate_step2_kernel(double *d_xc_sqr, double *d_xc_incoherent_single, unsigned int n_cap, double fs)
+{
+    const unsigned int tid = threadIdx.x;
+    const unsigned int bid = blockIdx.x;
+    const unsigned int index = 16 * bid + tid;
+    unsigned int max_m = (n_cap - 100 - 136) / 9600;
+    double xc_incoherent_single_val;
+
+    xc_incoherent_single_val = d_xc_sqr[index];
+    for (unsigned int m = 1; m < max_m; m++) {
+        unsigned int span = m * 0.005 * fs;
+        xc_incoherent_single_val += d_xc_sqr[index + span];
+    }
+    d_xc_incoherent_single[index] = xc_incoherent_single_val / max_m;
+}
+
+
+
+/*
+ *  Step 3 of xc_correlate()
+ */
+__global__ void xc_correlate_step3_kernel(double *d_xc_incoherent_single, double *d_xc_incoherent, uint8 ds_comb_arm)
+{
+    const unsigned int tid = threadIdx.x;
+    const unsigned int bid = blockIdx.x;
+    const unsigned int index = 16 * bid + tid;
+    double xc_incoherent_value = 0.0;
+
+    if (index < ds_comb_arm) {
+       for (unsigned int i = 0; i <= index + ds_comb_arm; i++) {
+           xc_incoherent_value += d_xc_incoherent_single[i];
+       }
+       for (unsigned int i = 9600 + index - ds_comb_arm; i < 9600; i++) {
+           xc_incoherent_value += d_xc_incoherent_single[i];
+       }
+    } else if (index < 9600 - ds_comb_arm) {
+       for (unsigned int i = index - ds_comb_arm; i <= index + ds_comb_arm; i++) {
+           xc_incoherent_value += d_xc_incoherent_single[i];
+       }
+    } else {
+       for (unsigned int i = index - ds_comb_arm; i < 9600; i++) {
+           xc_incoherent_value += d_xc_incoherent_single[i];
+       }
+       for (unsigned int i = 0; i <= index + ds_comb_arm - 9600; i++) {
+           xc_incoherent_value += d_xc_incoherent_single[i];
+       }
+    }
+
+    d_xc_incoherent[index] = xc_incoherent_value / (ds_comb_arm * 2 + 1);
+}
+
 
 /*
  *
@@ -306,6 +337,8 @@ __global__ void xc_incoherent_collapsed_kernel(double *d_xc_incoherent,
     d_xc_incoherent_collapsed_pow[tid * 9600 + bid] = best_pow;
     d_xc_incoherent_collapsed_frq[tid * 9600 + bid] = best_index;
 }
+
+
 
 /*
  *
@@ -420,10 +453,16 @@ void xcorr_pss2(const cvec & capbuf,
     /* xc_correlate, xc_combine, xc_delay_spread */
     for (unsigned int foi = 0; foi < n_f; foi++) {
         for (unsigned int t = 0; t < 3; t++) {
-            xc_correlate_kernel<<<600, 256>>>(d_capbuf, d_xc_sqr,
-                                              &d_xc_incoherent_single[(foi * 3 + t)*9600], &d_xc_incoherent[(foi * 3 + t)*9600],
-                                              n_cap, ds_comb_arm,
-                                              t, f_search_set[foi], (fc_requested - f_search_set[foi]) * fs_programmed /fc_programmed);
+            xc_correlate_step1_kernel<<<600, 256>>>(d_capbuf, d_xc_sqr,
+                                                    n_cap, t, f_search_set[foi], (fc_requested - f_search_set[foi]) * fs_programmed /fc_programmed);
+            checkCudaErrors(cudaDeviceSynchronize());
+
+            xc_correlate_step2_kernel<<<600, 16>>>(d_xc_sqr, &d_xc_incoherent_single[(foi * 3 + t)*9600], 
+                                                   n_cap, (fc_requested - f_search_set[foi]) * fs_programmed / fc_programmed);
+            checkCudaErrors(cudaDeviceSynchronize());
+
+            xc_correlate_step3_kernel<<<600, 16>>>(&d_xc_incoherent_single[(foi * 3 + t)*9600], &d_xc_incoherent[(foi * 3 + t)*9600],
+                                                   ds_comb_arm);
             checkCudaErrors(cudaDeviceSynchronize());
         }
     }
