@@ -428,7 +428,7 @@ void config_usb(
       ABORT(-1);
     }
     n_read+=n_read_current;
-    if (n_read>2880000*5)
+    if (n_read>2880000*2)
       break;
   }
   free(buffer);
