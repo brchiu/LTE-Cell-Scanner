@@ -2081,6 +2081,10 @@ __global__ void extract_tfg_singleblock_kernel(cufftDoubleComplex *d_capbuf, cuf
 }
 
 
+
+/*
+ *
+ */
 __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d_tfg, cufftDoubleComplex *d_rs_extracted, double *d_tfg_timestamp,
                              unsigned short n_id_cell, int n_symb_dl,
                              double fc_requested, double fc_programmed, double fs_programmed,
@@ -2127,8 +2131,8 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
 
             // rs_symb = 1 / sqrt(2) ((1 - 2 * c(0)) + j (1 - 2 * c(1))
 
-            std_rs.x = SQRT2_INV * (1 - ((rs_bits & 1) * 2));
-            std_rs.y = SQRT2_INV * (1 - ((rs_bits & 2)));
+            std_rs.x = SQRT2_INV * (1.0 - ((rs_bits & 1) * 2));
+            std_rs.y = SQRT2_INV * (1.0 - (rs_bits & 2));
 
             rcvd_rs = d_tfg[(slot * n_symb_dl + l) * 72 + v_offset];
 
@@ -2218,14 +2222,16 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
     if (tid < 2 * 122 - 1) {
 
         int slot1 = tid / 2;
-        int l1 = (tid & 1) ? (n_symb_dl - 3) : 0;
-        int rs_bits1 = rs_dl[(slot1 % 20) * 3 + ((l1 == 0) ? 0 : 2)];
-        int v_offset1 = ((n_id_cell % 6) + ((l1 == 0) ? 0 : 3)) % 6;
+        int first_sym1 = tid & 1;
+        int l1 = first_sym1 * (n_symb_dl - 3);
+        int rs_bits1 = rs_dl[(slot1 % 20) * 3 + (1 - first_sym1) * 2];
+        int v_offset1 = ((n_id_cell % 6) + first_sym1 * 3) % 6;
 
         int slot2 = (tid + 1) / 2;
-        int l2 = ((tid + 1) & 1) ? (n_symb_dl - 3) : 0;
-        int rs_bits2 = rs_dl[(slot2 % 20) * 3 + ((l2 == 0) ? 0 : 2)];
-        int v_offset2 = ((n_id_cell % 6) + ((l2 == 0) ? 0 : 3)) % 6;
+        int first_sym2 = (tid + 1) & 1;
+        int l2 = first_sym2 * (n_symb_dl - 3);
+        int rs_bits2 = rs_dl[(slot2 % 20) * 3 + (1 - first_sym2) * 2];
+        int v_offset2 = ((n_id_cell % 6) + first_sym2* 3) % 6;
 
         float real, imag;
 
@@ -2255,8 +2261,8 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
 
             // rs_symb = 1 / sqrt(2) ((1 - 2 * c(0)) + j (1 - 2 * c(1))
 
-            std_rs.x = SQRT2_INV * (1 - ((rs_bits1 & 1) * 2));
-            std_rs.y = SQRT2_INV * (1 - ((rs_bits1 & 2)));
+            std_rs.x = SQRT2_INV * (1.0 - ((rs_bits1 & 1) * 2));
+            std_rs.y = SQRT2_INV * (1.0 - ((rs_bits1 & 2)));
 
             rcvd_rs = d_tfg[(slot1 * n_symb_dl + l1) * 72 + v_offset1];
 
@@ -2265,8 +2271,8 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
             r1v.x = COMPLEX_MUL_REAL(rcvd_rs, std_rs);
             r1v.y = -COMPLEX_MUL_IMAG(rcvd_rs, std_rs); // this r1v is actually conj(r1v)
 
-            std_rs.x = SQRT2_INV * (1 - ((rs_bits2 & 1) * 2));
-            std_rs.y = SQRT2_INV * (1 - ((rs_bits2 & 2)));
+            std_rs.x = SQRT2_INV * (1.0 - ((rs_bits2 & 1) * 2));
+            std_rs.y = SQRT2_INV * (1.0 - ((rs_bits2 & 2)));
 
             std_rs.y = -std_rs.y;
 
