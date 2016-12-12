@@ -2333,7 +2333,349 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
     }
 }
 
-extern "C" Cell extract_tfg_and_tfoec(
+
+
+/*
+ *
+ */
+__global__ void chan_est_kernel(cufftDoubleComplex *d_tfg, int num_slot, int ant_port,
+                                unsigned short n_id_cell, int n_symb_dl,
+                                // output
+                                cufftDoubleComplex *d_ce_filt, double *d_err_pwr_acc)
+{
+    __shared__ unsigned int rs_dl[3];
+    __shared__ cufftDoubleComplex rcvd_rs[12 * 3], tfg_rs, conj_std_rs;
+    __shared__ float ce_err_pwr;
+
+    const unsigned int bid = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+
+    /*  */
+    int rs_no = bid;
+    int port = ant_port;
+    int rs_out = bid;
+
+    /*  */
+
+    const int port01 = 1 - (port / 2), port23 = port / 2;
+    const int rs_per_slot = 1 << port01;
+    const int total_rs = num_slot * rs_per_slot;
+    const int rs_slot = (rs_no / rs_per_slot) % 20;
+    // const int l_rs = port01 * ((rs_no & 1) * (n_symb_dl - 3)) + port23;
+    const int v = port01 * ((port & 1) ^ (rs_no & 1)) * 3 + port23 * ((port & 1) + (rs_slot & 1)) * 3;
+    const int k_offset = (v + (n_id_cell % 6)) % 6;
+
+    int pos, rs_count;
+    cufftDoubleComplex filt;
+
+
+    if (tid < 3) {
+        const int cinit_rs_no = rs_no - 1 + tid;
+        const int cinit_rs_slot = (cinit_rs_no / rs_per_slot) % 20;
+        const int cinit_l_rs = port01 * ((cinit_rs_no & 1) * (n_symb_dl - 3)) + port23;
+        const int cinit = ((7 * (cinit_rs_slot + 1) + cinit_l_rs + 1) * (2 * n_id_cell + 1) << 10) + 2 * n_id_cell + (n_symb_dl == 7 ? 1 : 0);
+
+        pn_seq_lsb_to_msb(cinit, 6 * 2 * 2, (55 - 3) * 2 * 2, &rs_dl[tid]);
+
+        ce_err_pwr = 0.0;
+    }
+
+    __syncthreads();
+
+    if (tid < 36) {
+        const int copy_rs_no = rs_no - 1 + (tid / 12);
+        const int copy_rs_slot = copy_rs_no / rs_per_slot;
+        const int copy_l_rs = port01 * ((copy_rs_no & 1) * (n_symb_dl - 3)) + port23;
+        const int copy_v = port01 * ((port & 1) ^ (copy_rs_no & 1)) * 3 + port23 * ((port & 1) + (copy_rs_slot & 1)) * 3;
+        const int copy_k_offset = (copy_v + (n_id_cell % 6)) % 6;
+
+        const unsigned int rs_bits = (rs_dl[tid / 12] >> (2 * (tid % 12))) & 0x3;
+        const int copy_pos = (tid / 12) * 12 + (tid % 12);
+
+
+        if ((0 <= copy_rs_no) && (copy_rs_no < total_rs)) {
+            tfg_rs.x = d_tfg[(copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12)].x;
+            tfg_rs.y = d_tfg[(copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12)].y;
+
+            conj_std_rs.x = SQRT2_INV * (1.0 - ((rs_bits & 0x1) * 2));
+            conj_std_rs.y = - SQRT2_INV * (1.0 - (rs_bits & 0x2));
+
+            rcvd_rs[copy_pos].x = COMPLEX_MUL_REAL(tfg_rs, conj_std_rs);
+            rcvd_rs[copy_pos].y = COMPLEX_MUL_IMAG(tfg_rs, conj_std_rs);
+        } else {
+            rcvd_rs[copy_pos].x = 0.0;
+            rcvd_rs[copy_pos].y = 0.0;
+        }
+    }
+
+    __syncthreads();
+
+    //  0   1   2   3                   9   10    11
+    //    0   1   2   3                   9    10    11
+    //  0   1   2   3                   9   10    11
+    //    0   1   2   3                   9    10    11
+    //  0   1   2   3                   9   10    11
+    //
+    //  k_offset < 3
+    //
+    //  (i,j=0)    ->                           |(i-1,j)(i,j)(i+1,j)|(i,j+1)
+    //  (i,j=1-10) -> (i-1,j-1)(i+1,j-1)|(i,j-1)|(i-1,j)(i,j)(i+1,j)|(i,j+1)
+    //  (i,j=11)   -> (i-1,j-1)(i+1,j-1)|(i,j-1)|(i-1,j)(i,j)(i+1,j)|
+    //
+    //  k_offset >= 3`
+    //
+    //  (i,j=0)    ->        |(i-1,j)(i,j)(i+1,j)|(i,j+1)|(i-1,j+1)(i+1,j+1)
+    //  (i,j=1-10) -> (i,j-1)|(i-1,j)(i,j)(i+1,j)|(i,j+1)|(i-1,j+1)(i+1,j+1)
+    //  (i,j=11)   -> (i,j-1)|(i-1,j)(i,j)(i+1,j)|
+    //
+
+    if (tid < 12) {
+        pos = 12 + tid;
+
+        filt.x = rcvd_rs[pos].x + rcvd_rs[pos - 12].x + rcvd_rs[pos + 12].x;
+        filt.y = rcvd_rs[pos].y + rcvd_rs[pos - 12].y + rcvd_rs[pos + 12].y;
+        rs_count = 3;
+        if (0 < tid) {
+            filt.x += rcvd_rs[pos - 1].x;
+            filt.y += rcvd_rs[pos - 1].y;
+            rs_count += 1;
+            if (k_offset < 3) {
+                filt.x += (rcvd_rs[pos - 12 - 1].x + rcvd_rs[pos + 12 - 1].x);
+                filt.y += (rcvd_rs[pos - 12 - 1].y + rcvd_rs[pos + 12 - 1].y);
+                rs_count += 2;
+            }
+        }
+        if (tid < 11) {
+            filt.x += rcvd_rs[pos + 1].x;
+            filt.y += rcvd_rs[pos + 1].y;
+            rs_count += 1;
+            if (3 <= k_offset) {
+                filt.x += (rcvd_rs[pos - 12 + 1].x + rcvd_rs[pos + 12 + 1].x);
+                filt.y += (rcvd_rs[pos - 12 + 1].y + rcvd_rs[pos + 12 + 1].y);
+                rs_count += 2;
+            }
+        }
+        if ((rs_no == 0) || (rs_no == total_rs - 1)) {
+            if (((k_offset < 3) && (tid == 0)) || ((k_offset >= 3) && (tid == 11))) {
+                rs_count -= 1;
+            } else {
+                rs_count -= 2;
+            }
+        }
+        filt.x /= rs_count;
+        filt.y /= rs_count;
+
+        d_ce_filt[rs_out * 12 + tid].x = filt.x;
+        d_ce_filt[rs_out * 12 + tid].y = filt.y;
+
+        double error_r = rcvd_rs[pos].x - filt.x;
+        double error_i = rcvd_rs[pos].y - filt.y;
+
+        atomicAdd(&ce_err_pwr, (float)(error_r * error_r + error_i * error_i));
+    }
+
+    __syncthreads();
+
+    if (tid == 0) {
+        d_err_pwr_acc[bid] = ce_err_pwr;
+    }
+}
+
+
+
+
+/*
+ *
+ */
+__global__ void chan_est_four_port_step1_kernel(cufftDoubleComplex *d_tfg, int num_slot,
+                                                unsigned short n_id_cell, int n_symb_dl,
+                                                // output
+                                                cufftDoubleComplex *d_ce_filt, double *d_err_pwr_acc)
+{
+    __shared__ unsigned int rs_dl[3];
+    __shared__ cufftDoubleComplex rcvd_rs[12 * 3], tfg_rs, conj_std_rs;
+    __shared__ float ce_err_pwr;
+
+    const unsigned int bid = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+
+    /* port 0 and port 1 has (2 * num_slot) symbols, port 3 and port 4 has (num_slot) symbols */
+
+    int rs_no = (bid < (4 * num_slot)) ? (bid % (2 * num_slot)) : (bid % num_slot);
+    int port = (bid < (4 * num_slot)) ? (bid / (num_slot * 2)) : ((bid / num_slot) - 2);
+    int rs_out = bid;
+
+    /*  */
+
+    const int port01 = 1 - (port / 2), port23 = port / 2;
+    const int rs_per_slot = 1 << port01;
+    const int total_rs = num_slot * rs_per_slot;
+    const int rs_slot = (rs_no / rs_per_slot) % 20;
+    const int l_rs = port01 * ((rs_no & 1) * (n_symb_dl - 3)) + port23;
+    const int v = port01 * ((port & 1) ^ (rs_no & 1)) * 3 + port23 * ((port & 1) + (rs_slot & 1)) * 3;
+    const int k_offset = (v + (n_id_cell % 6)) % 6;
+
+    int pos, rs_count;
+    cufftDoubleComplex filt;
+
+
+    if (tid < 3) {
+        const int cinit_rs_no = rs_no - 1 + tid;
+        const int cinit_rs_slot = (cinit_rs_no / rs_per_slot) % 20;
+        const int cinit_l_rs = port01 * ((cinit_rs_no & 1) * (n_symb_dl - 3)) + port23;
+        const int cinit = ((7 * (cinit_rs_slot + 1) + cinit_l_rs + 1) * (2 * n_id_cell + 1) << 10) + 2 * n_id_cell + (n_symb_dl == 7 ? 1 : 0);
+
+        pn_seq_lsb_to_msb(cinit, 6 * 2 * 2, (55 - 3) * 2 * 2, &rs_dl[tid]);
+
+        ce_err_pwr = 0.0;
+    }
+
+    __syncthreads();
+
+    if (tid < 36) {
+        const int copy_rs_no = rs_no - 1 + (tid / 12);
+        const int copy_rs_slot = copy_rs_no / rs_per_slot;
+        const int copy_l_rs = port01 * ((copy_rs_no & 1) * (n_symb_dl - 3)) + port23;
+        const int copy_v = port01 * ((port & 1) ^ (copy_rs_no & 1)) * 3 + port23 * ((port & 1) + (copy_rs_slot & 1)) * 3;
+        const int copy_k_offset = (copy_v + (n_id_cell % 6)) % 6;
+
+        const unsigned int rs_bits = (rs_dl[tid / 12] >> (2 * (tid % 12))) & 0x3;
+        const int copy_pos = (tid / 12) * 12 + (tid % 12);
+
+
+        if ((0 <= copy_rs_no) && (copy_rs_no < total_rs)) {
+            tfg_rs.x = d_tfg[(copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12)].x;
+            tfg_rs.y = d_tfg[(copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12)].y;
+
+            conj_std_rs.x = SQRT2_INV * (1.0 - ((rs_bits & 0x1) * 2));
+            conj_std_rs.y = - SQRT2_INV * (1.0 - (rs_bits & 0x2));
+
+            rcvd_rs[copy_pos].x = COMPLEX_MUL_REAL(tfg_rs, conj_std_rs);
+            rcvd_rs[copy_pos].y = COMPLEX_MUL_IMAG(tfg_rs, conj_std_rs);
+        } else {
+            rcvd_rs[copy_pos].x = 0.0;
+            rcvd_rs[copy_pos].y = 0.0;
+        }
+    }
+
+    __syncthreads();
+
+    //  0   1   2   3                   9   10    11
+    //    0   1   2   3                   9    10    11
+    //  0   1   2   3                   9   10    11
+    //    0   1   2   3                   9    10    11
+    //  0   1   2   3                   9   10    11
+    //
+    //  k_offset < 3
+    //
+    //  (i,j=0)    ->                           |(i-1,j)(i,j)(i+1,j)|(i,j+1)
+    //  (i,j=1-10) -> (i-1,j-1)(i+1,j-1)|(i,j-1)|(i-1,j)(i,j)(i+1,j)|(i,j+1)
+    //  (i,j=11)   -> (i-1,j-1)(i+1,j-1)|(i,j-1)|(i-1,j)(i,j)(i+1,j)|
+    //
+    //  k_offset >= 3`
+    //
+    //  (i,j=0)    ->        |(i-1,j)(i,j)(i+1,j)|(i,j+1)|(i-1,j+1)(i+1,j+1)
+    //  (i,j=1-10) -> (i,j-1)|(i-1,j)(i,j)(i+1,j)|(i,j+1)|(i-1,j+1)(i+1,j+1)
+    //  (i,j=11)   -> (i,j-1)|(i-1,j)(i,j)(i+1,j)|
+    //
+
+    if (tid < 12) {
+        pos = 12 + tid;
+
+        filt.x = rcvd_rs[pos].x + rcvd_rs[pos - 12].x + rcvd_rs[pos + 12].x;
+        filt.y = rcvd_rs[pos].y + rcvd_rs[pos - 12].y + rcvd_rs[pos + 12].y;
+        rs_count = 3;
+        if (0 < tid) {
+            filt.x += rcvd_rs[pos - 1].x;
+            filt.y += rcvd_rs[pos - 1].y;
+            rs_count += 1;
+            if (k_offset < 3) {
+                filt.x += (rcvd_rs[pos - 12 - 1].x + rcvd_rs[pos + 12 - 1].x);
+                filt.y += (rcvd_rs[pos - 12 - 1].y + rcvd_rs[pos + 12 - 1].y);
+                rs_count += 2;
+            }
+        }
+        if (tid < 11) {
+            filt.x += rcvd_rs[pos + 1].x;
+            filt.y += rcvd_rs[pos + 1].y;
+            rs_count += 1;
+            if (3 <= k_offset) {
+                filt.x += (rcvd_rs[pos - 12 + 1].x + rcvd_rs[pos + 12 + 1].x);
+                filt.y += (rcvd_rs[pos - 12 + 1].y + rcvd_rs[pos + 12 + 1].y);
+                rs_count += 2;
+            }
+        }
+        if ((rs_no == 0) || (rs_no == total_rs - 1)) {
+            if (((k_offset < 3) && (tid == 0)) || ((k_offset >= 3) && (tid == 11))) {
+                rs_count -= 1;
+            } else {
+                rs_count -= 2;
+            }
+        }
+
+        filt.x /= rs_count;
+        filt.y /= rs_count;
+
+        d_ce_filt[rs_out * 12 + tid].x = filt.x;
+        d_ce_filt[rs_out * 12 + tid].y = filt.y;
+
+        double error_r = rcvd_rs[pos].x - filt.x;
+        double error_i = rcvd_rs[pos].y - filt.y;
+
+        atomicAdd(&ce_err_pwr, (float)(error_r * error_r + error_i * error_i));
+    }
+
+    __syncthreads();
+
+    if (tid == 0) {
+        d_err_pwr_acc[bid] = ce_err_pwr;
+    }
+}
+
+
+
+
+/*
+ *
+ */
+__global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_slot,
+                                                // output
+                                                double *d_np)
+{
+    extern __shared__ double err_pwr_acc[];
+
+    const unsigned int bid = blockIdx.x;
+    const unsigned int tid = threadIdx.x;
+
+    const int port = bid;
+    const int no_sym = port < 2 ? 2 * num_slot : num_slot;
+    const int rs_no = port < 2 ? port * 2 : 4 + (port - 2);
+    double *d_err_pwr_acc_start = &d_err_pwr_acc[rs_no * num_slot];
+
+    if (tid < no_sym) {
+        err_pwr_acc[tid] = d_err_pwr_acc_start[tid];
+    }
+
+    __syncthreads();
+
+    for (unsigned int s = 128; s > 0; s >>= 1) {
+        if ((tid < s) && (tid + s < no_sym)) {
+            err_pwr_acc[tid] += err_pwr_acc[tid + s];
+        }
+        __syncthreads();
+    }
+
+    if (tid == 0) {
+        d_np[bid] = err_pwr_acc[0] / (no_sym * 12);
+    }
+}
+
+
+
+
+/*
+ *
+ */extern "C" Cell extract_tfg_and_tfoec(
     const Cell & cell,
     const cvec & capbuf_raw,
     const double & fc_requested,
@@ -2365,14 +2707,15 @@ extern "C" Cell extract_tfg_and_tfoec(
     cufftDoubleComplex *d_sss_raw = (cufftDoubleComplex *)NULL;
     double *d_pss_np_inv = (double *)NULL;
 
-    cufftDoubleComplex *d_M = (cufftDoubleComplex *)NULL; 
+    cufftDoubleComplex *d_M = (cufftDoubleComplex *)NULL;
+    double *d_err_pwr_acc = (double *)NULL;
 
     h_capbuf = (cufftDoubleComplex *)malloc(n_cap * sizeof(cufftDoubleComplex));
     h_tfg = (cufftDoubleComplex *)malloc(n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex));
 
     checkCudaErrors(cudaMalloc(&d_capbuf, n_cap * sizeof(cufftDoubleComplex)));
     checkCudaErrors(cudaMalloc(&d_tfg, n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex)));
-    checkCudaErrors(cudaMalloc(&d_rs_extracted, 2 * 122 * 12 * sizeof(cufftDoubleComplex)));
+    checkCudaErrors(cudaMalloc(&d_rs_extracted, (2 + 2 + 1 + 1) * 122 * 12 * sizeof(cufftDoubleComplex)));
     checkCudaErrors(cudaMalloc(&d_adjust_f, sizeof(double)));
     checkCudaErrors(cudaMalloc(&d_residual_f, sizeof(double)));
     checkCudaErrors(cudaMalloc(&d_tfg_timestamp, n_ofdm_sym * sizeof(double)));
@@ -2385,6 +2728,8 @@ extern "C" Cell extract_tfg_and_tfoec(
     checkCudaErrors(cudaMalloc(&d_n_id_1_est, sizeof(int)));
     checkCudaErrors(cudaMalloc(&d_cp_type, sizeof(int)));
     checkCudaErrors(cudaMalloc(&d_frame_start, sizeof(double)));
+
+    checkCudaErrors(cudaMalloc(&d_err_pwr_acc, (2 + 2 + 1 + 1) * 122  * sizeof(double)));
 
     for (unsigned int i = 0; i < n_cap; i++) {
         h_capbuf[i].x = capbuf_raw[i].real();
@@ -2404,7 +2749,6 @@ extern "C" Cell extract_tfg_and_tfoec(
     checkCudaErrors(cudaMalloc(&d_sss_raw, n_pss * 62 * 2 * sizeof(cufftDoubleComplex)));
     checkCudaErrors(cudaMalloc(&d_pss_np_inv, n_pss * sizeof(double)));
 
-    gettimeofday(&tv1, NULL);
     sss_detect_getce_sss_multiblocks_step1_kernel<<<n_pss, 128>>>(d_capbuf, n_pss,
                                                                   n_id_2_est, n_symb_dl, peak_loc,
                                                                   fc_requested, fc_programmed, fs_programmed, peak_freq,
@@ -2417,7 +2761,6 @@ extern "C" Cell extract_tfg_and_tfoec(
                                                                  // output
                                                                  d_sss_h12_np_est, &d_sss_h12_est[0], &d_sss_h12_est[62 * 2]);
     checkCudaErrors(cudaDeviceSynchronize());
-    gettimeofday(&tv2, NULL);
 
     sss_detect_ml_kernel<<<168*4, 124>>>(d_sss_h12_np_est, &d_sss_h12_est[0], &d_sss_h12_est[62 * 2], n_id_2_est,
                                          &d_log_lik[0], &d_log_lik[168 * 2]);
@@ -2470,6 +2813,14 @@ extern "C" Cell extract_tfg_and_tfoec(
                                     d_residual_f);
     checkCudaErrors(cudaDeviceSynchronize());
 
+    cufftDoubleComplex *d_ce_filt = d_rs_extracted; // re-use memory allocated for intermediate variables
+    double *d_np = d_log_lik; // re-use memory allocated for intermediate variables
+
+    chan_est_four_port_step1_kernel<<<122 * 6, 36>>>(d_tfg, 122, n_id_cell, n_symb_dl, &d_ce_filt[122 * 0 * 12], d_err_pwr_acc);
+
+    chan_est_four_port_step2_kernel<<<4, 122 * 2, 2 * 122 * sizeof(double)>>>(d_err_pwr_acc, 122, &d_np[0]);
+    checkCudaErrors(cudaDeviceSynchronize());
+
     checkCudaErrors(cudaMemcpy(h_tfg, d_tfg, n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(&h_adjust_f, d_adjust_f, sizeof(double), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(&h_residual_f, d_residual_f, sizeof(double), cudaMemcpyDeviceToHost));
@@ -2500,7 +2851,9 @@ extern "C" Cell extract_tfg_and_tfoec(
     checkCudaErrors(cudaFree(d_sss_raw));
     checkCudaErrors(cudaFree(d_pss_np_inv));
 
-    checkCudaErrors(cudaFree(d_M)); 
+    checkCudaErrors(cudaFree(d_M));
+
+    checkCudaErrors(cudaFree(d_err_pwr_acc));
 
     Cell cell_out(cell);
     cell_out.freq_fine = cell_out.freq + h_adjust_f;
