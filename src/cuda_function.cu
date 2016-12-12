@@ -361,7 +361,7 @@ __global__ void sp_incoherent_kernel(cufftDoubleComplex *d_capbuf, double *d_sp_
         }
         s_sqr[tid] = value;
     } else {
-        s_sqr[tid] = 0.0f;
+        s_sqr[tid] = 0.0;
     }
 
     __syncthreads();
@@ -377,6 +377,126 @@ __global__ void sp_incoherent_kernel(cufftDoubleComplex *d_capbuf, double *d_sp_
         d_sp_incoherent[index] = value / (274.0 * n_comb_sp);
         d_Z_th1[index] = d_sp_incoherent[index] * Z_th1_factor;
     }
+}
+
+
+
+/*
+ *
+ */
+__global__ void peak_search_kernel(double *d_xc_incoherent_collapsed_pow, int *d_xc_incoherent_collapsed_frq, double *d_f_search_set,
+                                   double *d_Z_th1, double *d_xc_incoherent_single, short *d_aux, int ds_comb_arm)
+{
+    __shared__ unsigned int finished;
+    __shared__ double thresh1, thresh2, peak_pow;
+    __shared__ short peak_pos, peak_ind, peak_n_id_2;
+
+    const int tid = threadIdx.x;
+    short pos, pos_ind, pos_n_id_2;
+    double pos_pow;
+
+    for (unsigned int i = tid; i < 9600 * 3; i += 1024) {
+        d_aux[i] = i;
+    }
+
+    __syncthreads();
+
+    do {
+        for (unsigned int k = 0; k < 9600 * 3; k += 2048) {
+            for (unsigned int s = 1024; s > 0; s >>= 1) {
+                if ((tid < s) && (k + tid + s < 9600 * 3)) {
+                    int pos1 = d_aux[k + tid];
+                    int pos2 = d_aux[k + tid + s];
+
+                    if (d_xc_incoherent_collapsed_pow[pos1] < d_xc_incoherent_collapsed_pow[pos2]) {
+                        d_aux[k + tid] = pos2;
+                        d_aux[k + tid + s] = pos1;
+                    }
+                }
+            }
+            __syncthreads();
+        }
+
+        for (unsigned int s = 8; s > 0; s >>= 1) {
+            if ((tid < s) && ((tid + s) * 2048 < 9600 * 3)) {
+                int pos1 = d_aux[tid * 2048];
+                int pos2 = d_aux[(tid + s) * 2048];
+
+                if (d_xc_incoherent_collapsed_pow[pos1] < d_xc_incoherent_collapsed_pow[pos2]) {
+                    d_aux[tid * 2048] = pos2;
+                    d_aux[(tid + s) * 2048] = pos1;
+                }
+            }
+            __syncthreads();
+        }
+
+        if (tid == 0) {
+            peak_pos = d_aux[0];
+            peak_pow = d_xc_incoherent_collapsed_pow[peak_pos];
+
+            if (peak_pow < d_Z_th1[peak_ind]) {
+                finished = 1;
+            } else {
+
+                finished = 0;
+                peak_n_id_2 = peak_pos / 9600;
+                peak_ind = peak_pos - peak_n_id_2 * 9600;
+
+                int freq_idx = d_xc_incoherent_collapsed_frq[peak_pos];
+                double freq = d_f_search_set[freq_idx];
+                double best_pow = -CUDART_INF;
+                short best_ind = -1;
+                int t = peak_ind - ds_comb_arm;
+
+                if (t < 0) t += 9600;
+
+                for (unsigned int i = 0; i < 2 * ds_comb_arm + 1; i++) {
+                    if (d_xc_incoherent_single[(freq_idx * 3 + peak_n_id_2) * 9600 + t] > best_pow) {
+                        best_ind = t;
+                        best_pow = d_xc_incoherent_single[(freq_idx * 3 + peak_n_id_2) * 9600 + t];
+                    }
+                    t++;
+                    if (t >= 9600) t-= 9600;
+                }
+
+                thresh1 = peak_pow * 0.1584893192461113; // udb10(-8.0) = pow(10.0,-8.0/10.0);
+                thresh2 = peak_pow * 0.0630957344480193; // udb10(-12.0) = pow(10.0,-12.0/10.0);
+            }
+        }
+
+        __syncthreads();
+
+        if (!finished) {
+
+            for (unsigned int i = tid; i < 3 * 9600; i += 1024) {
+
+                pos = d_aux[i];
+
+                pos_n_id_2 = pos / 9600;
+                pos_ind = pos - pos_n_id_2 * 9600;
+                pos_pow = d_xc_incoherent_collapsed_pow[pos];
+
+                if (pos_pow < thresh2) {
+                    d_xc_incoherent_collapsed_pow[pos] = 0.0;
+                }
+
+                /* 9600 - 274 <= pos_ind - peak_ind + 9600 <= 9600 + 274 */
+
+                if (((9600 - 274) <= (pos_ind - peak_ind + 9600)) && 
+                    ((pos_ind - peak_ind + 9600) <= (9600 + 274))) {
+
+                    if (peak_n_id_2 == pos_n_id_2) {
+                       d_xc_incoherent_collapsed_pow[pos] = 0.0;
+                    } else if (pos_pow < thresh1) {
+                       d_xc_incoherent_collapsed_pow[pos] = 0.0;
+                    }
+                }
+            }
+        }
+
+       __syncthreads();
+
+    } while (!finished);
 }
 
 
@@ -412,6 +532,7 @@ void xcorr_pss2(const cvec & capbuf,
 
     cufftDoubleComplex *h_capbuf = (cufftDoubleComplex *)NULL, *d_capbuf = (cufftDoubleComplex *)NULL;
     double *h_f = (double *)NULL, *d_f = (double *)NULL;
+    double *h_f_search_set = (double *)NULL, *d_f_search_set = (double *)NULL;
     double *h_xc_sqr = (double *)NULL, *d_xc_sqr = (double *)NULL;
     double *h_xc_incoherent_single = (double *)NULL, *d_xc_incoherent_single = (double *)NULL;
     double *h_xc_incoherent = (double *)NULL, *d_xc_incoherent = (double *)NULL;
@@ -419,9 +540,11 @@ void xcorr_pss2(const cvec & capbuf,
     int *h_xc_incoherent_collapsed_frq = (int *)NULL, *d_xc_incoherent_collapsed_frq = (int *)NULL;
     double *h_sp_incoherent = (double *)NULL, *d_sp_incoherent = (double *)NULL;
     double *h_Z_th1 = (double *)NULL, *d_Z_th1 = (double *)NULL;
+    short *d_aux = (short *)NULL;
 
     h_capbuf = (cufftDoubleComplex *)malloc(n_cap * sizeof(cufftDoubleComplex));
     h_f = (double *)malloc(n_f * sizeof(double));
+    h_f_search_set = (double *)malloc(n_f * sizeof(double));
     h_xc_incoherent_single = (double *)malloc(3 * n_f * 9600 * sizeof(double));
     h_xc_incoherent = (double *)malloc(3 * n_f * 9600 * sizeof(double));
     h_xc_incoherent_collapsed_pow = (double *)malloc(3 * 9600 * sizeof(double));
@@ -432,6 +555,7 @@ void xcorr_pss2(const cvec & capbuf,
 
     checkCudaErrors(cudaMalloc(&d_capbuf, n_cap * sizeof(cufftDoubleComplex)));
     checkCudaErrors(cudaMalloc(&d_f, n_f * sizeof(double)));
+    checkCudaErrors(cudaMalloc(&d_f_search_set, n_f * sizeof(double)));
     checkCudaErrors(cudaMalloc(&d_xc_sqr, n_cap * sizeof(double)));
     checkCudaErrors(cudaMalloc(&d_xc_incoherent_single, 3 * n_f * 9600 * sizeof(double)));
     checkCudaErrors(cudaMalloc(&d_xc_incoherent, 3 * n_f * 9600 * sizeof(double)));
@@ -439,6 +563,8 @@ void xcorr_pss2(const cvec & capbuf,
     checkCudaErrors(cudaMalloc(&d_xc_incoherent_collapsed_frq, 3 * 9600 * sizeof(int)));
     checkCudaErrors(cudaMalloc(&d_sp_incoherent, 9600 * sizeof(double)));
     checkCudaErrors(cudaMalloc(&d_Z_th1, 9600 * sizeof(double)));
+
+    checkCudaErrors(cudaMalloc(&d_aux, 9600 * 3 * sizeof(short)));
 
     for (unsigned int i = 0; i < n_cap; i++) {
         h_capbuf[i].x = capbuf[i].real();
@@ -449,9 +575,11 @@ void xcorr_pss2(const cvec & capbuf,
 
     for (unsigned int i = 0; i < n_f; i++) {
         h_f[i] = CUDART_PI * 2 * f_search_set[i] * fc_programmed / (fs_programmed * (fc_requested - f_search_set[i]));
+        h_f_search_set[i] = f_search_set[i];
     }
 
     checkCudaErrors(cudaMemcpy(d_f, h_f, n_f * sizeof(double), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(d_f_search_set, h_f_search_set, n_f * sizeof(double), cudaMemcpyHostToDevice));
 
     /* xc_correlate, xc_combine, xc_delay_spread */
     for (unsigned int foi = 0; foi < n_f; foi++) {
@@ -490,6 +618,10 @@ void xcorr_pss2(const cvec & capbuf,
     checkCudaErrors(cudaMemcpy(h_sp_incoherent, d_sp_incoherent, 9600 * sizeof(double), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(h_Z_th1, d_Z_th1, 9600 * sizeof(double), cudaMemcpyDeviceToHost));
 
+    peak_search_kernel<<<1, 1024>>>(d_xc_incoherent_collapsed_pow, d_xc_incoherent_collapsed_frq, d_f_search_set,
+                                    d_Z_th1, d_xc_incoherent_single, d_aux, ds_comb_arm);
+    checkCudaErrors(cudaDeviceSynchronize());
+
     /* copy data for subsequent functions */
     sp_incoherent = vec(9600);
     xc_incoherent_collapsed_pow = mat(3, 9600);
@@ -517,6 +649,7 @@ void xcorr_pss2(const cvec & capbuf,
 
     free(h_capbuf);
     free(h_f);
+    free(h_f_search_set);
     free(h_xc_incoherent_single);
     free(h_xc_incoherent);
     free(h_xc_incoherent_collapsed_pow);
@@ -526,6 +659,7 @@ void xcorr_pss2(const cvec & capbuf,
 
     checkCudaErrors(cudaFree(d_capbuf));
     checkCudaErrors(cudaFree(d_f));
+    checkCudaErrors(cudaFree(d_f_search_set));
     checkCudaErrors(cudaFree(d_xc_sqr));
     checkCudaErrors(cudaFree(d_xc_incoherent_single));
     checkCudaErrors(cudaFree(d_xc_incoherent));
@@ -533,8 +667,7 @@ void xcorr_pss2(const cvec & capbuf,
     checkCudaErrors(cudaFree(d_xc_incoherent_collapsed_frq));
     checkCudaErrors(cudaFree(d_sp_incoherent));
 
-    gettimeofday(&tv2, NULL);
-    printf("xcorr_pss2 : %ld us\n", (tv2.tv_sec-tv1.tv_sec)*1000000+(tv2.tv_usec-tv1.tv_usec));
+    checkCudaErrors(cudaFree(d_aux));
 }
 
 
