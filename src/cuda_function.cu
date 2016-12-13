@@ -270,7 +270,6 @@ __global__ void xc_correlate_step2_kernel(double *d_xc_sqr, double *d_xc_incoher
     const unsigned int tid = threadIdx.x;
     const unsigned int bid = blockIdx.x;
     const double k_factor = (fc_requested - f_off)/fc_programmed;
-    const double k = CUDART_PI * f_off / (fs_programmed * k_factor / 2);
     const unsigned int index = 16 * bid + tid;
     const unsigned int max_m = (n_cap - 100 - 136) / 9600;
     double xc_incoherent_single_val;
@@ -681,14 +680,13 @@ void xcorr_pss2(const cvec & capbuf,
  *  Step 1 of sss_detect_getce_sss()
  */
 __global__ void sss_detect_getce_sss_multiblocks_step1_kernel(cufftDoubleComplex *d_capbuf, int n_pss,
-                                                              unsigned short n_id_2_est, int n_symb_dl, double peak_loc,
+                                                              unsigned short n_id_2_est, double peak_loc,
                                                               double fc_requested, double fc_programmed, double fs_programmed, double peak_freq,
                                                               // output
-                                                              cufftDoubleComplex *d_h_sm, double *d_pss_np_inv, cufftDoubleComplex *d_sss_nrm_raw, cufftDoubleComplex *d_sss_ext_raw)
-                                                              // float *d_sss_h12_np_est, cufftDoubleComplex *d_sss_h12_nrm_est, cufftDoubleComplex *d_sss_h12_ext_est)
+                                                              cufftDoubleComplex *d_h_sm, double *d_pss_np, cufftDoubleComplex *d_sss_nrm_raw, cufftDoubleComplex *d_sss_ext_raw)
 {
     __shared__ cufftDoubleComplex s_pss_dft[128], s_nrm_sss_dft[128], s_ext_sss_dft[128];
-    __shared__ cufftDoubleComplex h_raw[62], shift, *p_pss_fd;
+    __shared__ cufftDoubleComplex h_raw[62], *p_pss_fd;
     __shared__ float pss_np;
 
     const unsigned int bid = blockIdx.x;
@@ -698,7 +696,7 @@ __global__ void sss_detect_getce_sss_multiblocks_step1_kernel(cufftDoubleComplex
     const unsigned int pss_dft_location = lround(peak_loc + bid * k_factor * 9600 + 9 - 2);
     const unsigned int nrm_sss_dft_location = pss_dft_location - 128 - 9;
     const unsigned int ext_sss_dft_location = pss_dft_location - 128 - 32;
-    cufftDoubleComplex acc;
+    cufftDoubleComplex shift, acc;
     double noise_r, noise_i;
 
     double k = CUDART_PI * (-peak_freq) / ((fs_programmed * k_factor) / 2);
@@ -720,12 +718,12 @@ __global__ void sss_detect_getce_sss_multiblocks_step1_kernel(cufftDoubleComplex
         s_ext_sss_dft[126 + tid].x = COMPLEX_MUL_REAL(d_capbuf[ext_sss_dft_location + tid], shift);
         s_ext_sss_dft[126 + tid].y = COMPLEX_MUL_IMAG(d_capbuf[ext_sss_dft_location + tid], shift);
     } else if (tid < 128) {
-        s_pss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location + 2 + tid], shift);
-        s_pss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location + 2 + tid], shift);
-        s_nrm_sss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[nrm_sss_dft_location + 2 + tid], shift);
-        s_nrm_sss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[nrm_sss_dft_location + 2 + tid], shift);
-        s_ext_sss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[ext_sss_dft_location + 2 + tid], shift);
-        s_ext_sss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[ext_sss_dft_location + 2 + tid], shift);
+        s_pss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location + tid], shift);
+        s_pss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location + tid], shift);
+        s_nrm_sss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[nrm_sss_dft_location + tid], shift);
+        s_nrm_sss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[nrm_sss_dft_location + tid], shift);
+        s_ext_sss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[ext_sss_dft_location + tid], shift);
+        s_ext_sss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[ext_sss_dft_location + tid], shift);
     }
 
     __syncthreads();
@@ -801,8 +799,7 @@ __global__ void sss_detect_getce_sss_multiblocks_step1_kernel(cufftDoubleComplex
     __syncthreads();
 
     if (tid == 0) {
-        pss_np = pss_np / 62.0;
-        d_pss_np_inv[bid] = pss_np;
+        d_pss_np[bid] = pss_np / 62;
     }
 
     __syncthreads();
@@ -812,18 +809,16 @@ __global__ void sss_detect_getce_sss_multiblocks_step1_kernel(cufftDoubleComplex
     //  index   :  0,  1,       30, 31, 32, 33,    , 61
     //  dft_out : 97, 98, .... 127,  1,  2,  3, ..., 31
 
-    const double pss_np_inv_SQRT128_INV = (1 / pss_np) * SQRT128_INV;
-
     if (tid < 31) {
-        d_sss_nrm_raw[output_offset + tid].x = pss_np_inv_SQRT128_INV * s_nrm_sss_dft[tid + 97].x;
-        d_sss_nrm_raw[output_offset + tid].y = pss_np_inv_SQRT128_INV * s_nrm_sss_dft[tid + 97].y; 
-        d_sss_ext_raw[output_offset + tid].x = pss_np_inv_SQRT128_INV * s_ext_sss_dft[tid + 97].x;
-        d_sss_ext_raw[output_offset + tid].y = pss_np_inv_SQRT128_INV * s_ext_sss_dft[tid + 97].y; 
+        d_sss_nrm_raw[output_offset + tid].x = SQRT128_INV * s_nrm_sss_dft[tid + 97].x;
+        d_sss_nrm_raw[output_offset + tid].y = SQRT128_INV * s_nrm_sss_dft[tid + 97].y; 
+        d_sss_ext_raw[output_offset + tid].x = SQRT128_INV * s_ext_sss_dft[tid + 97].x;
+        d_sss_ext_raw[output_offset + tid].y = SQRT128_INV * s_ext_sss_dft[tid + 97].y; 
     } else if (tid < 62) {
-        d_sss_nrm_raw[output_offset + tid].x = pss_np_inv_SQRT128_INV * s_nrm_sss_dft[tid - 30].x;
-        d_sss_nrm_raw[output_offset + tid].y = pss_np_inv_SQRT128_INV * s_nrm_sss_dft[tid - 30].y;
-        d_sss_ext_raw[output_offset + tid].x = pss_np_inv_SQRT128_INV * s_ext_sss_dft[tid - 30].x;
-        d_sss_ext_raw[output_offset + tid].y = pss_np_inv_SQRT128_INV * s_ext_sss_dft[tid - 30].y;
+        d_sss_nrm_raw[output_offset + tid].x = SQRT128_INV * s_nrm_sss_dft[tid - 30].x;
+        d_sss_nrm_raw[output_offset + tid].y = SQRT128_INV * s_nrm_sss_dft[tid - 30].y;
+        d_sss_ext_raw[output_offset + tid].x = SQRT128_INV * s_ext_sss_dft[tid - 30].x;
+        d_sss_ext_raw[output_offset + tid].y = SQRT128_INV * s_ext_sss_dft[tid - 30].y;
     }
 }
 
@@ -833,12 +828,13 @@ __global__ void sss_detect_getce_sss_multiblocks_step1_kernel(cufftDoubleComplex
  *  Step 2 of sss_detect_getce_sss()
  */
 __global__ void sss_detect_getce_sss_multiblocks_step2_kernel(int n_pss,
-                                                              cufftDoubleComplex *d_h_sm, double *d_pss_np_inv, cufftDoubleComplex *d_sss_nrm_raw, cufftDoubleComplex *d_sss_ext_raw,
+                                                              cufftDoubleComplex *d_h_sm, double *d_pss_np, cufftDoubleComplex *d_sss_nrm_raw, cufftDoubleComplex *d_sss_ext_raw,
                                                               // output
                                                               float *d_sss_h12_np_est, cufftDoubleComplex *d_sss_h12_nrm_est, cufftDoubleComplex *d_sss_h12_ext_est)
 {
     __shared__ cufftDoubleComplex h_sm[50], sss_nrm_raw[50], sss_ext_raw[50];
-    __shared__ double pss_np_inv[50], sss_np_est[2];
+    __shared__ double pss_np_inv[50];
+    __shared__ double sss_np_est[2];
     __shared__ float sss_h12_nrm_est_real[2], sss_h12_nrm_est_imag[2];
     __shared__ float sss_h12_ext_est_real[2], sss_h12_ext_est_imag[2];
     __shared__ float sum_of_sqr_sm_pss_np_inv[2];
@@ -851,7 +847,7 @@ __global__ void sss_detect_getce_sss_multiblocks_step2_kernel(int n_pss,
         return;
     }
 
-    pss_np_inv[tid] = d_pss_np_inv[tid];
+    pss_np_inv[tid] = 1.0 / d_pss_np[tid];
     h_sm[tid] = d_h_sm[tid * 62 + bid];
     sss_nrm_raw[tid] = d_sss_nrm_raw[tid * 62 + bid];
     sss_ext_raw[tid] = d_sss_ext_raw[tid * 62 + bid];
@@ -922,9 +918,9 @@ __global__ void sss_detect_getce_sss_multiblocks_step2_kernel(int n_pss,
     nrm_real = nrm_imag = ext_real = ext_imag = sss_np_est[tid & 1] * pss_np_inv[tid];
 
     nrm_real *= (h_sm[tid].x * sss_nrm_raw[tid].x + h_sm[tid].y * sss_nrm_raw[tid].y);
-    nrm_imag *= (h_sm[tid].x * sss_nrm_raw[tid].y - h_sm[tid].y * sss_nrm_raw[tid].y);
+    nrm_imag *= (h_sm[tid].x * sss_nrm_raw[tid].y - h_sm[tid].y * sss_nrm_raw[tid].x);
     ext_real *= (h_sm[tid].x * sss_ext_raw[tid].x + h_sm[tid].y * sss_ext_raw[tid].y);
-    ext_imag *= (h_sm[tid].x * sss_ext_raw[tid].y - h_sm[tid].y * sss_ext_raw[tid].y);
+    ext_imag *= (h_sm[tid].x * sss_ext_raw[tid].y - h_sm[tid].y * sss_ext_raw[tid].x);
 
     atomicAdd(&sss_h12_nrm_est_real[tid & 1], (float)nrm_real);
     atomicAdd(&sss_h12_nrm_est_imag[tid & 1], (float)nrm_imag);
@@ -2106,9 +2102,9 @@ __global__ void extract_tfg_multiblocks_kernel(cufftDoubleComplex *d_capbuf, cuf
 
     // cvec capbuf = fshift(capbuf_raw, -freq_fine, fs_programmed * k_factor);
     double k = CUDART_PI * (-freq_fine) / (fs_programmed * k_factor / 2);
-
-    shift.x = cos(k * (dft_location_i + tid));
-    shift.y = sin(k * (dft_location_i + tid));
+    double theta = k * (dft_location_i + tid);
+    shift.x = cos(theta);
+    shift.y = sin(theta);
 
     s_capbuf[tid].x = COMPLEX_MUL_REAL(d_capbuf[dft_location_i + tid], shift);
     s_capbuf[tid].y = COMPLEX_MUL_IMAG(d_capbuf[dft_location_i + tid], shift);
@@ -2223,13 +2219,13 @@ __global__ void extract_tfg_singleblock_kernel(cufftDoubleComplex *d_capbuf, cuf
 /*
  *
  */
-__global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d_tfg, cufftDoubleComplex *d_rs_extracted, double *d_tfg_timestamp,
+__global__ void tfoec_kernel(cufftDoubleComplex *d_tfg, cufftDoubleComplex *d_rs_extracted, double *d_tfg_timestamp,
                              unsigned short n_id_cell, int n_symb_dl,
                              double fc_requested, double fc_programmed, double fs_programmed,
                              // output
                              double *d_residual_f)
 {
-    __shared__ unsigned int rs_dl[20 * 3];
+    __shared__ unsigned int rs_dl[20 * 2];
     __shared__ float foe_real, foe_imag;
     __shared__ float toe_real, toe_imag;
 
@@ -2240,9 +2236,9 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
 
     // generate random sequences for symbol 0, 1, 3/4 of 20 slots
 
-    if (tid < 20 * 3) {
-        int slot = tid / 3;
-        int l = (tid % 3 == 2) ? n_symb_dl - 3 : tid % 3;
+    if (tid < 20 * 2) {
+        int slot = tid / 2;
+        int l = (tid & 1) * (n_symb_dl - 3);
         int cinit = ((7 * (slot + 1) + l + 1) * (2 * n_id_cell + 1) << 10) + 2 * n_id_cell + (n_symb_dl == 7 ? 1 : 0);
 
         pn_seq_lsb_to_msb(cinit, 6 * 2 * 2, (55 - 3) * 2 * 2, &rs_dl[tid]);
@@ -2259,9 +2255,10 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
 
     if (tid < 122 * 2) {
         int slot = tid / 2;
-        int l = (tid & 1) ? (n_symb_dl - 3) : 0;
-        int rs_bits = rs_dl[((tid / 2) % 20) * 3 + ((l == 0) ? 0 : 2)];
-        int v_offset = ((n_id_cell % 6) + ((l == 0) ? 0 : 3)) % 6;
+        int second_sym = tid & 1;
+        int l = second_sym * (n_symb_dl - 3);
+        int rs_bits = rs_dl[(slot % 20) * 2 + second_sym];
+        int v_offset = ((n_id_cell % 6) + second_sym * 3) % 6;
 
         // elem_mult(rs_extracted.get_row(t), conj(rs_dl.get_rs(mod(t, 20), sym_num)))
         for (unsigned int i = 0; i < 12; i++, rs_bits >>= 2, v_offset += 6) {
@@ -2360,16 +2357,16 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
     if (tid < 2 * 122 - 1) {
 
         int slot1 = tid / 2;
-        int first_sym1 = tid & 1;
-        int l1 = first_sym1 * (n_symb_dl - 3);
-        int rs_bits1 = rs_dl[(slot1 % 20) * 3 + (1 - first_sym1) * 2];
-        int v_offset1 = ((n_id_cell % 6) + first_sym1 * 3) % 6;
+        int second_sym1 = tid & 1;
+        int l1 = second_sym1 * (n_symb_dl - 3);
+        int rs_bits1 = rs_dl[(slot1 % 20) * 2 + second_sym1];
+        int v_offset1 = ((n_id_cell % 6) + second_sym1 * 3) % 6;
 
         int slot2 = (tid + 1) / 2;
-        int first_sym2 = (tid + 1) & 1;
-        int l2 = first_sym2 * (n_symb_dl - 3);
-        int rs_bits2 = rs_dl[(slot2 % 20) * 3 + (1 - first_sym2) * 2];
-        int v_offset2 = ((n_id_cell % 6) + first_sym2* 3) % 6;
+        int second_sym2 = (tid + 1) & 1;
+        int l2 = second_sym2 * (n_symb_dl - 3);
+        int rs_bits2 = rs_dl[(slot2 % 20) * 2 + second_sym2];
+        int v_offset2 = ((n_id_cell % 6) + second_sym2 * 3) % 6;
 
         float real, imag;
 
@@ -2803,10 +2800,39 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
 
 
 
+/*
+ *  for debug
+ */
+__global__ void print_kernel_float(float *d_data, int len)
+{
+    printf("\n\nprint_kernel_float\n");
+    for (int i = 0; i < len;i++)
+        printf("(%f)", d_data[i]);
+    printf("\n\n");
+}
+
+
+__global__ void print_kernel_double(double *d_data, int len)
+{
+    printf("\n\nprint_kernel_double\n");
+    for (int i = 0; i < len;i++)
+        printf("(%f)",d_data[i]);
+    printf("\n\n");
+}
+
+__global__ void print_kernel_complex(cufftDoubleComplex *d_data, int len)
+{
+    printf("\n\nprint_kernel_complex\n");
+    for (int i = 0; i < len;i++)
+        printf("(%lf,%lf)", d_data[i].x, d_data[i].y);
+    printf("\n\n");
+}
+
 
 /*
  *
- */extern "C" Cell extract_tfg_and_tfoec(
+ */
+extern "C" Cell extract_tfg_and_tfoec(
     const Cell & cell,
     const cvec & capbuf_raw,
     const double & fc_requested,
@@ -2815,17 +2841,15 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
     // Output
     cmat & my_tfg_comp)
 {
-    struct timeval tv1, tv2;
-
-    const double frame_start = cell.frame_start;
-    const int n_symb_dl = cell.n_symb_dl();
-    const int n_ofdm_sym = (6*10*2+2)*n_symb_dl;
     const unsigned int n_cap = capbuf_raw.length();
-    const unsigned int n_id_cell = cell.n_id_cell();
+
+    Cell cell_out(cell);
 
     cufftDoubleComplex *h_capbuf = (cufftDoubleComplex *)NULL, *d_capbuf = (cufftDoubleComplex *)NULL;
     cufftDoubleComplex *h_tfg = (cufftDoubleComplex *)NULL, *d_tfg = (cufftDoubleComplex *)NULL;
     cufftDoubleComplex *d_rs_extracted = (cufftDoubleComplex *)NULL;
+    double h_frame_start;
+    int h_n_id_1_est, h_cp_type;
     double h_residual_f, *d_residual_f = (double *)NULL;
     double h_adjust_f, *d_adjust_f = (double *)NULL;
     double *d_tfg_timestamp = (double *)NULL;
@@ -2841,20 +2865,9 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
     cufftDoubleComplex *d_M = (cufftDoubleComplex *)NULL;
     double *d_err_pwr_acc = (double *)NULL;
 
-    h_capbuf = (cufftDoubleComplex *)malloc(n_cap * sizeof(cufftDoubleComplex));
-    h_tfg = (cufftDoubleComplex *)malloc(n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex));
-
-    checkCudaErrors(cudaMalloc(&d_capbuf, n_cap * sizeof(cufftDoubleComplex)));
-    checkCudaErrors(cudaMalloc(&d_tfg, n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex)));
     checkCudaErrors(cudaMalloc(&d_rs_extracted, (2 + 2 + 1 + 1) * 122 * 12 * sizeof(cufftDoubleComplex)));
     checkCudaErrors(cudaMalloc(&d_adjust_f, sizeof(double)));
     checkCudaErrors(cudaMalloc(&d_residual_f, sizeof(double)));
-    checkCudaErrors(cudaMalloc(&d_tfg_timestamp, n_ofdm_sym * sizeof(double)));
-
-    checkCudaErrors(cudaMalloc(&d_sss_h12_np_est, 62 * 2 * sizeof(float)));
-    checkCudaErrors(cudaMalloc(&d_sss_h12_est, 62 * 2 * 2 * sizeof(cufftDoubleComplex)));
- 
-    checkCudaErrors(cudaMalloc(&d_log_lik, 168 * 2 * 2 * sizeof(double)));
 
     checkCudaErrors(cudaMalloc(&d_n_id_1_est, sizeof(int)));
     checkCudaErrors(cudaMalloc(&d_cp_type, sizeof(int)));
@@ -2862,26 +2875,32 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
 
     checkCudaErrors(cudaMalloc(&d_err_pwr_acc, (2 + 2 + 1 + 1) * 122  * sizeof(double)));
 
+    h_capbuf = (cufftDoubleComplex *)malloc(n_cap * sizeof(cufftDoubleComplex));
+
     for (unsigned int i = 0; i < n_cap; i++) {
         h_capbuf[i].x = capbuf_raw[i].real();
         h_capbuf[i].y = capbuf_raw[i].imag();
     }
+    checkCudaErrors(cudaMalloc(&d_capbuf, n_cap * sizeof(cufftDoubleComplex)));
     checkCudaErrors(cudaMemcpy(d_capbuf, h_capbuf, n_cap * sizeof(cufftDoubleComplex), cudaMemcpyHostToDevice));
 
     /* prologue of function sss_detect() of searcher.cpp */
 
-    const double peak_freq = cell.freq;
+    const double peak_freq = cell_out.freq;
     double k_factor = (fc_requested - peak_freq) / fc_programmed; 
-    double peak_loc = (cell.ind + 9 < 162 ? cell.ind + 9600 * k_factor : cell.ind);
-    const unsigned int n_id_2_est = cell.n_id_2;
+    double peak_loc = (cell.ind + 9 < 162 ? cell_out.ind + 9600 * k_factor : cell_out.ind);
+    const unsigned int n_id_2_est = cell_out.n_id_2;
     const int n_pss = ceil((n_cap - 125 - 9 - peak_loc) / (k_factor * 9600));
 
     checkCudaErrors(cudaMalloc(&d_h_sm, 62 * n_pss * sizeof(cufftDoubleComplex)));
     checkCudaErrors(cudaMalloc(&d_sss_raw, n_pss * 62 * 2 * sizeof(cufftDoubleComplex)));
     checkCudaErrors(cudaMalloc(&d_pss_np_inv, n_pss * sizeof(double)));
+    checkCudaErrors(cudaMalloc(&d_sss_h12_np_est, 62 * 2 * sizeof(float)));
+    checkCudaErrors(cudaMalloc(&d_sss_h12_est, 62 * 2 * 2 * sizeof(cufftDoubleComplex)));
+    checkCudaErrors(cudaMalloc(&d_log_lik, 168 * 2 * 2 * sizeof(double)));
 
     sss_detect_getce_sss_multiblocks_step1_kernel<<<n_pss, 128>>>(d_capbuf, n_pss,
-                                                                  n_id_2_est, n_symb_dl, peak_loc,
+                                                                  n_id_2_est, peak_loc,
                                                                   fc_requested, fc_programmed, fs_programmed, peak_freq,
                                                                   // output
                                                                   d_h_sm, d_pss_np_inv, &d_sss_raw[0], &d_sss_raw[n_pss * 62]);
@@ -2904,9 +2923,25 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
                                                 d_n_id_1_est, d_frame_start, d_cp_type);
     checkCudaErrors(cudaDeviceSynchronize());
 
+    checkCudaErrors(cudaMemcpy(&h_cp_type, d_cp_type, sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(&h_n_id_1_est, d_n_id_1_est, sizeof(int), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(&h_frame_start, d_frame_start, sizeof(double), cudaMemcpyDeviceToHost));
+
+    cell_out.frame_start = h_frame_start;
+    cell_out.n_id_1 = h_n_id_1_est;
+    cell_out.cp_type = (cp_type_t::cp_type_t)h_cp_type;
+
+    const int n_symb_dl = (h_cp_type == (int)cp_type_t::NORMAL ? 7 : 6);
+    const int n_ofdm_sym = (6*10*2+2)*n_symb_dl;
+    const double frame_start = h_frame_start;
+
+    h_tfg = (cufftDoubleComplex *)malloc(n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex));
+
+    checkCudaErrors(cudaMalloc(&d_tfg, n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex)));
+    checkCudaErrors(cudaMalloc(&d_tfg_timestamp, n_ofdm_sym * sizeof(double)));
+
     /* prologue of function pss_sss_foe() of searcher.cpp */
 
-    k_factor = (fc_requested - cell.freq) / fc_programmed;
     const unsigned int pss_sss_dist = lround((128 + (n_symb_dl == 7 ? 9 : 32)) * 16 / FS_LTE * fs_programmed * k_factor);
     double first_sss_dft_location = frame_start + (960 - 128 - (n_symb_dl == 7 ? 9 : 32)-128) * 16 / FS_LTE * fs_programmed * k_factor;
     const int n_sss = ceil((n_cap - 127 - pss_sss_dist - 100) / (9600 * 16 / FS_LTE * fs_programmed * k_factor));
@@ -2918,6 +2953,8 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
     }
 
     checkCudaErrors(cudaMalloc(&d_M, n_sss * sizeof(cufftDoubleComplex)));
+
+    const unsigned int n_id_cell = cell_out.n_id_cell();
 
     pss_sss_foe_multiblocks_step1_kernel<<<n_sss, 128>>>(d_capbuf, n_sss,
                                                          n_id_cell, n_symb_dl, first_sss_dft_location, pss_sss_dist, sn,
@@ -2932,17 +2969,25 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
                                                        d_adjust_f);
     checkCudaErrors(cudaDeviceSynchronize());
 
+    checkCudaErrors(cudaMemcpy(&h_adjust_f, d_adjust_f, sizeof(double), cudaMemcpyDeviceToHost));
+
+    cell_out.freq_fine = cell_out.freq + h_adjust_f;
+
     extract_tfg_multiblocks_kernel<<<n_ofdm_sym, 128>>>(d_capbuf, d_tfg, d_tfg_timestamp, d_adjust_f,
                                                         n_id_cell, n_symb_dl, frame_start,
-                                                        fc_requested, fc_programmed, fs_programmed, cell.freq);
+                                                        fc_requested, fc_programmed, fs_programmed, cell_out.freq);
     checkCudaErrors(cudaDeviceSynchronize());
 
-    tfoec_kernel<<<1, n_ofdm_sym>>>(d_capbuf, d_tfg, d_rs_extracted, d_tfg_timestamp,
+    tfoec_kernel<<<1, n_ofdm_sym>>>(d_tfg, d_rs_extracted, d_tfg_timestamp,
                                     n_id_cell, n_symb_dl,
                                     fc_requested, fc_programmed, fs_programmed,
                                     // output
                                     d_residual_f);
     checkCudaErrors(cudaDeviceSynchronize());
+
+    checkCudaErrors(cudaMemcpy(&h_residual_f, d_residual_f, sizeof(double), cudaMemcpyDeviceToHost));
+
+    cell_out.freq_superfine = cell_out.freq_fine + h_residual_f;
 
     cufftDoubleComplex *d_ce_filt = d_rs_extracted; // re-use memory allocated for intermediate variables
     double *d_np = d_log_lik; // re-use memory allocated for intermediate variables
@@ -2953,13 +2998,13 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
     checkCudaErrors(cudaDeviceSynchronize());
 
     checkCudaErrors(cudaMemcpy(h_tfg, d_tfg, n_ofdm_sym * 12 * 6 * sizeof(cufftDoubleComplex), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(&h_adjust_f, d_adjust_f, sizeof(double), cudaMemcpyDeviceToHost));
-    checkCudaErrors(cudaMemcpy(&h_residual_f, d_residual_f, sizeof(double), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaDeviceSynchronize());
 
     my_tfg_comp = cmat(n_ofdm_sym, 72);
     for (int i = 0; i < n_ofdm_sym; i++) {
         for (unsigned int j = 0; j < 72; j++) {
-            my_tfg_comp.set(i, j, complex<double>(h_tfg[i * 72 + j].x, h_tfg[i * 72 + j].y));
+            my_tfg_comp(i,j).real() = h_tfg[i * 72 + j].x;
+            my_tfg_comp(i,j).imag() = h_tfg[i * 72 + j].y;
         }
     }
 
@@ -2985,10 +3030,6 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
     checkCudaErrors(cudaFree(d_M));
 
     checkCudaErrors(cudaFree(d_err_pwr_acc));
-
-    Cell cell_out(cell);
-    cell_out.freq_fine = cell_out.freq + h_adjust_f;
-    cell_out.freq_superfine = cell_out.freq_fine + h_residual_f;
     return cell_out;
 }
 
