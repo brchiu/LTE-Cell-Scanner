@@ -31,9 +31,14 @@ using namespace std;
 using namespace itpp;
 
 #define SIGNAL_SIZE 128
-#define SQRT2_INV   (0.7071067817811865475)
-#define SQRT62_INV  (0.1270001270001905)
-#define SQRT128_INV (0.0883883476483184)
+#define SQRT2_INV               (0.7071067817811865475)
+#define SQRT62_INV              (0.1270001270001905)
+#define SQRT128_INV             (0.0883883476483184)
+#define COMPLEX_MUL_REAL(a, b)  ((a).x * (b).x - (a).y * (b).y)
+#define COMPLEX_MUL_IMAG(a, b)  ((a).x * (b).y + (a).y * (b).x)
+
+#undef SWAP
+#define SWAP(x,y)               do { typeof (x) __tmp = (x); (x) = (y); (y) = (__tmp); } while (0)
 
 __constant__ cufftDoubleComplex pss_fd[3][62];
 __constant__ cufftDoubleComplex pss_td[3][256];
@@ -116,7 +121,6 @@ extern "C" void cuda_copy_constant_data_to_device()
 /*
  * Return bit-reverse of number n in nbits bits.
  */
-
 extern "C" unsigned int reverse_bit(unsigned int n, int nbits)
 {
     unsigned int reverse_num = 0;
@@ -136,7 +140,6 @@ extern "C" unsigned int reverse_bit(unsigned int n, int nbits)
  * Example : s=1, assuming 4442 -> 2444
  *           s=0, assuming 2444 -> 4442
  */
-
 extern "C" unsigned int reverse_radix_4_and_2(unsigned int n, int nbits, int s)
 {
     unsigned int reverse_num = 0;
@@ -170,7 +173,6 @@ extern "C" unsigned int reverse_radix_4_and_2(unsigned int n, int nbits, int s)
  *
  * Now support data of length N less or equal to 128.
  */
-
 extern "C" void generate_twiddle_factor(int N)
 {
     int nbits = ceil(log(1.0 * N) / log(2.0));
@@ -189,10 +191,10 @@ extern "C" void generate_twiddle_factor(int N)
 }
 
 
+
 /*
  * Calculate angle of complex number with real and imag.
  */
-
 __device__ double angle(float real, float imag)
 {
     if (real > 0.0) {
@@ -211,10 +213,6 @@ __device__ double angle(float real, float imag)
         return CUDART_NAN;
     }
 }
-
-
-#define COMPLEX_MUL_REAL(a, b)  ((a).x * (b).x - (a).y * (b).y)
-#define COMPLEX_MUL_IMAG(a, b)  ((a).x * (b).y + (a).y * (b).x)
 
 
 
@@ -494,7 +492,7 @@ __global__ void peak_search_kernel(double *d_xc_incoherent_collapsed_pow, int *d
             }
         }
 
-       __syncthreads();
+        __syncthreads();
 
     } while (!finished);
 }
@@ -2376,14 +2374,7 @@ __global__ void tfoec_kernel(cufftDoubleComplex *d_capbuf, cufftDoubleComplex *d
         toe2.x = 0.0; toe2.y = 0.0;
         r2v_prev.x = 0.0; r2v_prev.y = 0.0;
 
-#undef SWAP
-#define SWAP(x,y) \
-    do { (tmp) = (x); (x) = (y); (y) = (tmp); \
-    } while(0)
-
         if (v_offset2 < v_offset1) {
-            int tmp;
-
             SWAP(slot1, slot2);
             SWAP(l1, l2);
             SWAP(rs_bits1, rs_bits2);
