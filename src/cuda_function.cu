@@ -220,13 +220,16 @@ __device__ double angle(float real, float imag)
  *  Step 1 of xc_correlate()
  */
 __global__ void xc_correlate_step1_kernel(cufftDoubleComplex *d_capbuf, double *d_xc_sqr,
-                                          unsigned int n_cap, unsigned int t, double f, double fs)
+                                          const unsigned int n_cap, const unsigned int t,
+                                          const double f_off, const double fc_requested, const double fc_programmed, const double fs_programmed)
 {
     __shared__ cufftDoubleComplex s_fshift_pss[256], s_capbuf[256 + 137];
 
     const unsigned int tid = threadIdx.x;
     const unsigned int bid = blockIdx.x;
-    double k = CUDART_PI * f * 2 / fs;
+
+    const double k_factor = (fc_requested - f_off)/fc_programmed;
+    const double k = CUDART_PI * f_off / (fs_programmed * k_factor / 2);
     double shift = k * tid;
     double x1 = cos(shift), y1 = sin(shift);
     double x2 = pss_td[t][tid].x, y2 = pss_td[t][tid].y;
@@ -261,17 +264,20 @@ __global__ void xc_correlate_step1_kernel(cufftDoubleComplex *d_capbuf, double *
 /*
  * Step 2 of xc_correlate()
  */
-__global__ void xc_correlate_step2_kernel(double *d_xc_sqr, double *d_xc_incoherent_single, unsigned int n_cap, double fs)
+__global__ void xc_correlate_step2_kernel(double *d_xc_sqr, double *d_xc_incoherent_single, const unsigned int n_cap,
+                                          const double f_off, const double fc_requested, const double fc_programmed, const double fs_programmed)
 {
     const unsigned int tid = threadIdx.x;
     const unsigned int bid = blockIdx.x;
+    const double k_factor = (fc_requested - f_off)/fc_programmed;
+    const double k = CUDART_PI * f_off / (fs_programmed * k_factor / 2);
     const unsigned int index = 16 * bid + tid;
-    unsigned int max_m = (n_cap - 100 - 136) / 9600;
+    const unsigned int max_m = (n_cap - 100 - 136) / 9600;
     double xc_incoherent_single_val;
 
     xc_incoherent_single_val = d_xc_sqr[index];
     for (unsigned int m = 1; m < max_m; m++) {
-        unsigned int span = m * 0.005 * fs;
+        unsigned int span = lround(m * 0.005 * k_factor * fs_programmed);
         xc_incoherent_single_val += d_xc_sqr[index + span];
     }
     d_xc_incoherent_single[index] = xc_incoherent_single_val / max_m;
@@ -582,12 +588,13 @@ void xcorr_pss2(const cvec & capbuf,
     /* xc_correlate, xc_combine, xc_delay_spread */
     for (unsigned int foi = 0; foi < n_f; foi++) {
         for (unsigned int t = 0; t < 3; t++) {
-            xc_correlate_step1_kernel<<<600, 256>>>(d_capbuf, d_xc_sqr,
-                                                    n_cap, t, f_search_set[foi], (fc_requested - f_search_set[foi]) * fs_programmed /fc_programmed);
+
+            xc_correlate_step1_kernel<<<600, 256>>>(d_capbuf, d_xc_sqr, n_cap, t,
+                                                    f_search_set[foi], fc_requested, fc_programmed, fs_programmed);
             checkCudaErrors(cudaDeviceSynchronize());
 
-            xc_correlate_step2_kernel<<<600, 16>>>(d_xc_sqr, &d_xc_incoherent_single[(foi * 3 + t)*9600], 
-                                                   n_cap, (fc_requested - f_search_set[foi]) * fs_programmed / fc_programmed);
+            xc_correlate_step2_kernel<<<600, 16>>>(d_xc_sqr, &d_xc_incoherent_single[(foi * 3 + t)*9600], n_cap,
+                                                   f_search_set[foi], fc_requested, fc_programmed, fs_programmed);
             checkCudaErrors(cudaDeviceSynchronize());
 
             xc_correlate_step3_kernel<<<600, 16>>>(&d_xc_incoherent_single[(foi * 3 + t)*9600], &d_xc_incoherent[(foi * 3 + t)*9600],
