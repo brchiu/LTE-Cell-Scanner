@@ -39,6 +39,7 @@ using namespace itpp;
 using namespace std;
 
 uint8 verbosity=1;
+uint8 use_cuda=0;
 
 // Simple usage screen.
 void print_usage() {
@@ -127,6 +128,7 @@ void parse_commandline(
       {"load",         no_argument,       0, 'l'},
       {"data-dir",     required_argument, 0, 'd'},
       {"device-index", required_argument, 0, 'i'},
+      {"cuda",         no_argument,       0, 'g'},
       {0, 0, 0, 0}
     };
     /* getopt_long stores the option index here. */
@@ -207,6 +209,9 @@ void parse_commandline(
       case '?':
         /* getopt_long already printed an error message. */
         ABORT(-1);
+      case 'g':
+        use_cuda = 1;
+        break;
       default:
         ABORT(-1);
     }
@@ -435,11 +440,16 @@ void config_usb(
 }
 
 extern "C" void cuda_reset_device();
+extern "C" void cuda_generate_fft_aux_data(int N);
 extern "C" void cuda_copy_constant_data_to_device();
-extern "C" void generate_twiddle_factor(int N);
-extern "C" Cell extract_tfg_and_tfoec(Cell & cell, const cvec & capbuf_raw, const double & fc_requested, const double & fc_programmed, const double & fs_programmed,
-             // Output
-             cmat & my_tfg_comp);
+extern "C" void cuda_xcorr_pss_peak_search(const itpp::cvec &capbuf, const itpp::vec &f_search_set, const uint8 &ds_comb_arm, const double &fc_requested, const double &fc_programmed,
+                                           const double &fs_programmed,
+                                           // Outputs
+                                           list <Cell> &cells);
+extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est
+                                          (Cell & cell, const cvec & capbuf_raw, const double & fc_requested, const double & fc_programmed, const double & fs_programmed,
+                                           // Output
+                                           cmat & my_tfg_comp);
 
 // Main cell search routine.
 int main(
@@ -466,7 +476,7 @@ int main(
     config_usb(correction,device_index,freq_start,dev,fs_programmed);
 
   cuda_reset_device();
-  generate_twiddle_factor(128);
+  cuda_generate_fft_aux_data(128);
   cuda_copy_constant_data_to_device();
 
   // Generate a list of center frequencies that should be searched and also
@@ -506,103 +516,81 @@ int main(
     if (verbosity>=2) {
       cout << "  Calculating PSS correlations" << endl;
     }
-struct timeval tv1, tv2, tv3, tv4, tv5, tv6, tv7, tv8, tv9, tv10, tv11, tv12;
-extern int gettimeofday(struct timeval *tv, struct timezone *tz);
-gettimeofday(&tv1, NULL);
-    xcorr_pss2(capbuf,f_search_set,DS_COMB_ARM,fc_requested,fc_programmed,fs_programmed,xc_incoherent_collapsed_pow,xc_incoherent_collapsed_frq,xc_incoherent_single,xc_incoherent,sp_incoherent,xc,sp,n_comb_xc,n_comb_sp);
-gettimeofday(&tv2, NULL);
 
-    // Calculate the threshold vector
-    const uint8 thresh1_n_nines=12;
-    double R_th1=chi2cdf_inv(1-pow(10.0,-thresh1_n_nines),2*n_comb_xc*(2*DS_COMB_ARM+1));
-    double rx_cutoff=(6*12*15e3/2+4*15e3)/(FS_LTE/16/2);
-    vec Z_th1=R_th1*sp_incoherent/rx_cutoff/137/2/n_comb_xc/(2*DS_COMB_ARM+1);
-
-    // Search for the peaks
-    if (verbosity>=2) {
-      cout << "  Searching for and examining correlation peaks..." << endl;
-    }
     list <Cell> peak_search_cells;
-    peak_search(xc_incoherent_collapsed_pow,xc_incoherent_collapsed_frq,Z_th1,f_search_set,fc_requested,fc_programmed,xc_incoherent_single,DS_COMB_ARM,peak_search_cells);
-gettimeofday(&tv3, NULL);
+
+    if (use_cuda) {
+      cuda_xcorr_pss_peak_search(capbuf,f_search_set,DS_COMB_ARM,fc_requested,fc_programmed,fs_programmed, peak_search_cells);
+    } else {
+      xcorr_pss(capbuf,f_search_set,DS_COMB_ARM,fc_requested,fc_programmed,fs_programmed,xc_incoherent_collapsed_pow,xc_incoherent_collapsed_frq,xc_incoherent_single,xc_incoherent,sp_incoherent,xc,sp,n_comb_xc,n_comb_sp);
+
+      // Calculate the threshold vector
+      const uint8 thresh1_n_nines=12;
+      double R_th1=chi2cdf_inv(1-pow(10.0,-thresh1_n_nines),2*n_comb_xc*(2*DS_COMB_ARM+1));
+      double rx_cutoff=(6*12*15e3/2+4*15e3)/(FS_LTE/16/2);
+      vec Z_th1=R_th1*sp_incoherent/rx_cutoff/137/2/n_comb_xc/(2*DS_COMB_ARM+1);
+
+      // Search for the peaks
+      if (verbosity>=2) {
+        cout << "  Searching for and examining correlation peaks..." << endl;
+      }
+
+      peak_search(xc_incoherent_collapsed_pow,xc_incoherent_collapsed_frq,Z_th1,f_search_set,fc_requested,fc_programmed,xc_incoherent_single,DS_COMB_ARM,peak_search_cells);
+    }
+
     detected_cells[fci]=peak_search_cells;
-printf("peak_search_cells : %d\n", peak_search_cells.size());
+
     // Loop and check each peak
     list<Cell>::iterator iterator=detected_cells[fci].begin();
     while (iterator!=detected_cells[fci].end()) {
       //cout << "Further examining: " << endl;
       //cout << (*iterator) << endl << endl;
 
-      // Detect SSS if possible
-      vec sss_h1_np_est_meas;
-      vec sss_h2_np_est_meas;
-      cvec sss_h1_nrm_est_meas;
-      cvec sss_h2_nrm_est_meas;
-      cvec sss_h1_ext_est_meas;
-      cvec sss_h2_ext_est_meas;
-      mat log_lik_nrm;
-      mat log_lik_ext;
+      if (0) {
+        cmat tfg_comp;
+        Cell cell_out = cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est((*iterator), capbuf, fc_requested, fc_programmed, fs_programmed, tfg_comp);
+
+        // (*iterator) = decode_mib_lower_half((*iterator), tfg_comp);
+      } else {
+        cmat tfg_comp2;
+        Cell cell_out = cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est((*iterator), capbuf, fc_requested, fc_programmed, fs_programmed, tfg_comp2);
+
+        // Detect SSS if possible
+        vec sss_h1_np_est_meas;
+        vec sss_h2_np_est_meas;
+        cvec sss_h1_nrm_est_meas;
+        cvec sss_h2_nrm_est_meas;
+        cvec sss_h1_ext_est_meas;
+        cvec sss_h2_ext_est_meas;
+        mat log_lik_nrm;
+        mat log_lik_ext;
 #define THRESH2_N_SIGMA 3
+        (*iterator)=sss_detect((*iterator),capbuf,THRESH2_N_SIGMA,fc_requested,fc_programmed,fs_programmed,sss_h1_np_est_meas,sss_h2_np_est_meas,sss_h1_nrm_est_meas,sss_h2_nrm_est_meas,sss_h1_ext_est_meas,sss_h2_ext_est_meas,log_lik_nrm,log_lik_ext);
+        if ((*iterator).n_id_1==-1) {
+          // No SSS detected.
+          iterator=detected_cells[fci].erase(iterator);
+          continue;
+        }
 
-gettimeofday(&tv4, NULL);
-      (*iterator)=sss_detect((*iterator),capbuf,THRESH2_N_SIGMA,fc_requested,fc_programmed,fs_programmed,sss_h1_np_est_meas,sss_h2_np_est_meas,sss_h1_nrm_est_meas,sss_h2_nrm_est_meas,sss_h1_ext_est_meas,sss_h2_ext_est_meas,log_lik_nrm,log_lik_ext);
-gettimeofday(&tv5, NULL);
-      if ((*iterator).n_id_1==-1) {
-        // No SSS detected.
-        iterator=detected_cells[fci].erase(iterator);
-        continue;
+        // Fine FOE
+        (*iterator)=pss_sss_foe((*iterator),capbuf,fc_requested,fc_programmed,fs_programmed);
+
+        // Extract time and frequency grid
+        cmat tfg;
+        vec tfg_timestamp;
+        extract_tfg((*iterator),capbuf,fc_requested,fc_programmed,fs_programmed,tfg,tfg_timestamp);
+
+        // Create object containing all RS
+        RS_DL rs_dl((*iterator).n_id_cell(),6,(*iterator).cp_type);
+
+        // Compensate for time and frequency offsets
+        cmat tfg_comp;
+        vec tfg_comp_timestamp;
+        (*iterator)=tfoec((*iterator),tfg,tfg_timestamp,fc_requested,fc_programmed,rs_dl,tfg_comp,tfg_comp_timestamp);
+
+        // Finally, attempt to decode the MIB
+        (*iterator)=decode_mib((*iterator),tfg_comp,rs_dl);
       }
-
-      // Fine FOE
-#if 0
-gettimeofday(&tv6, NULL);
-      (*iterator)=pss_sss_foe((*iterator),capbuf,fc_requested,fc_programmed,fs_programmed);
-gettimeofday(&tv7, NULL);
-
-      // Extract time and frequency grid
-
-      cmat tfg;
-      vec tfg_timestamp;
-      extract_tfg((*iterator),capbuf,fc_requested,fc_programmed,fs_programmed,tfg,tfg_timestamp);
-gettimeofday(&tv8, NULL);
-
-      // Create object containing all RS
-      RS_DL rs_dl((*iterator).n_id_cell(),6,(*iterator).cp_type);
-gettimeofday(&tv9, NULL);
-
-      // Compensate for time and frequency offsets
-      cmat tfg_comp;
-      vec tfg_comp_timestamp;
-      (*iterator)=tfoec((*iterator),tfg,tfg_timestamp,fc_requested,fc_programmed,rs_dl,tfg_comp,tfg_comp_timestamp);
-gettimeofday(&tv10, NULL);
-#else
-gettimeofday(&tv7, NULL);
-      RS_DL rs_dl((*iterator).n_id_cell(),6,(*iterator).cp_type);
-gettimeofday(&tv8, NULL);
-
-      cmat tfg_comp;
-      (*iterator)=extract_tfg_and_tfoec((*iterator), capbuf, fc_requested, fc_programmed, fs_programmed, tfg_comp);
-gettimeofday(&tv9, NULL);
-#endif
-
-
-      // Finally, attempt to decode the MIB
-gettimeofday(&tv11, NULL);
-      (*iterator)=decode_mib((*iterator),tfg_comp,rs_dl);
-gettimeofday(&tv12, NULL);
-
-if (verbosity>=1) {
-#if 1
-cout << "xcorr_pss2  " << (tv2.tv_sec-tv1.tv_sec)*1000000+(tv2.tv_usec-tv1.tv_usec) << " us" << endl;
-cout << "peak_search " << (tv3.tv_sec-tv2.tv_sec)*1000000+(tv3.tv_usec-tv2.tv_usec) << " us" << endl;
-cout << "sss_detect  " << (tv5.tv_sec-tv4.tv_sec)*1000000+(tv5.tv_usec-tv4.tv_usec) << " us" << endl;
-// cout << "pss_sss_foe " << (tv7.tv_sec-tv6.tv_sec)*1000000+(tv7.tv_usec-tv6.tv_usec) << " us" << endl;
-cout << "rs_dl       " << (tv8.tv_sec-tv7.tv_sec)*1000000+(tv8.tv_usec-tv7.tv_usec) << " us" << endl;
-cout << "extract_tfg_and_tfoec_step     " << (tv9.tv_sec-tv8.tv_sec)*1000000+(tv9.tv_usec-tv8.tv_usec) << " us" << endl;
-cout << "decode_mib  " << (tv12.tv_sec-tv11.tv_sec)*1000000+(tv12.tv_usec-tv11.tv_usec) << " us" << endl;
-#endif
-}
-
       if ((*iterator).n_rb_dl==-1) {
         // No MIB could be successfully decoded.
         iterator=detected_cells[fci].erase(iterator);
@@ -615,7 +603,6 @@ cout << "decode_mib  " << (tv12.tv_sec-tv11.tv_sec)*1000000+(tv12.tv_usec-tv11.t
         cout << "    RX power level: " << db10((*iterator).pss_pow) << " dB" << endl;
         cout << "    residual frequency offset: " << (*iterator).freq_superfine << " Hz" << endl;
       }
-
       ++iterator;
     }
   }

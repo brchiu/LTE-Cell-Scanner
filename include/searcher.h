@@ -40,27 +40,6 @@ void xcorr_pss(
   uint16 & n_comb_sp
 );
 
-void xcorr_pss2(
-  // Inputs
-  const itpp::cvec & capbuf,
-  const itpp::vec & f_search_set,
-  const uint8 & ds_comb_arm,
-  const double & fc_requested,
-  const double & fc_programmed,
-  const double & fs_programmed,
-  // Outputs
-  itpp::mat & xc_incoherent_collapsed_pow,
-  itpp::imat & xc_incoherent_collapsed_frq,
-  // Only used for testing
-  vf3d & xc_incoherent_single,
-  vf3d & xc_incoherent,
-  itpp::vec & sp_incoherent,
-  vcf3d & xc,
-  itpp::vec & sp,
-  uint16 & n_comb_xc,
-  uint16 & n_comb_sp
-);
-
 // Search the correlations for peaks.
 void peak_search(
   // Inputs
