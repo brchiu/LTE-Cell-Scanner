@@ -42,7 +42,7 @@ using namespace itpp;
 #define MAX_CELL_PER_FREQ           (10)
 
 #define FFT_SIZE                    (128)
-#define SQRT2_INV                   (0.7071067817811865475)
+#define SQRT2_INV                   (CUDART_SQRT_HALF)
 #define SQRT62_INV                  (0.1270001270001905)
 #define SQRT128_INV                 (0.0883883476483184)
 #define ONE_SIXTH                   (0.1666666666666667)
@@ -3073,7 +3073,6 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     Cell cell_out(cell);
 
     cuDoubleComplex *h_capbuf = (cuDoubleComplex *)NULL, *d_capbuf = (cuDoubleComplex *)NULL;
-    cuDoubleComplex *h_tfg = (cuDoubleComplex *)NULL;
     double h_frame_start;
     int h_n_id_1_est, h_cp_type;
     double h_residual_f, *d_residual_f = (double *)NULL;
@@ -3106,8 +3105,10 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     const int n_pss = ceil((n_cap - 125 - 9 - peak_loc) / (k_factor * 9600));
 
     LTE_DECODE_AUX_DATA *d_lte_decode_aux_data = (LTE_DECODE_AUX_DATA *)NULL;
+    LTE_DECODE_AUX_DATA *h_lte_decode_aux_data = (LTE_DECODE_AUX_DATA *)NULL;
 
     checkCudaErrors(cudaMalloc(&d_lte_decode_aux_data, sizeof(LTE_DECODE_AUX_DATA)));
+    h_lte_decode_aux_data = (LTE_DECODE_AUX_DATA *)malloc(sizeof(LTE_DECODE_AUX_DATA));
     
     sss_detect_getce_sss_multiblocks_step1_kernel<<<n_pss, 128>>>(d_capbuf, n_pss,
                                                                   n_id_2_est, peak_loc,
@@ -3147,8 +3148,6 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     const int n_symb_dl = (h_cp_type == (int)cp_type_t::NORMAL ? 7 : 6);
     const int n_ofdm_sym = (6*10*2+2)*n_symb_dl;
     const double frame_start = h_frame_start;
-
-    h_tfg = (cuDoubleComplex *)malloc(n_ofdm_sym * 12 * 6 * sizeof(cuDoubleComplex));
 
     /* prologue of function pss_sss_foe() of searcher.cpp */
 
@@ -3203,19 +3202,19 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     chan_est_four_port_step2_kernel<<<4, 122 * 2, 2 * 122 * sizeof(double)>>>(&(d_lte_decode_aux_data->err_pwr_acc[0]), 122, &(d_lte_decode_aux_data->np_v[0]));
     checkCudaErrors(cudaDeviceSynchronize());
 
-    checkCudaErrors(cudaMemcpy(h_tfg, &(d_lte_decode_aux_data->tfg[0]), n_ofdm_sym * 12 * 6 * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(&(h_lte_decode_aux_data->tfg[0]), &(d_lte_decode_aux_data->tfg[0]), n_ofdm_sym * 12 * 6 * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaDeviceSynchronize());
 
     my_tfg_comp = cmat(n_ofdm_sym, 72);
     for (int i = 0; i < n_ofdm_sym; i++) {
         for (unsigned int j = 0; j < 72; j++) {
-            my_tfg_comp(i,j).real() = h_tfg[i * 72 + j].x;
-            my_tfg_comp(i,j).imag() = h_tfg[i * 72 + j].y;
+            my_tfg_comp(i,j).real() = h_lte_decode_aux_data->tfg[i * 72 + j].x;
+            my_tfg_comp(i,j).imag() = h_lte_decode_aux_data->tfg[i * 72 + j].y;
         }
     }
 
     free(h_capbuf);
-    free(h_tfg);
+    free(h_lte_decode_aux_data);
 
     checkCudaErrors(cudaFree(d_lte_decode_aux_data));
     checkCudaErrors(cudaFree(d_capbuf));
