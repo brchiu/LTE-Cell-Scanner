@@ -589,7 +589,7 @@ int main(
         (*iterator)=tfoec((*iterator),tfg,tfg_timestamp,fc_requested,fc_programmed,rs_dl,tfg_comp,tfg_comp_timestamp);
 
         // Finally, attempt to decode the MIB
-        (*iterator)=decode_mib((*iterator),tfg_comp,rs_dl);
+        (*iterator)=decode_mib((*iterator),tfg_comp2,rs_dl);
       }
       if ((*iterator).n_rb_dl==-1) {
         // No MIB could be successfully decoded.

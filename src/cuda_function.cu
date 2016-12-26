@@ -30,28 +30,32 @@
 using namespace std;
 using namespace itpp;
 
-#define MAX_CAPTURE_SIZE        (153600)
-#define NUM_SLOT_TO_SEARCH      (6*10*2+2)
-#define MAX_NUM_SYMB_PER_SLOT   (7)
-#define NUM_OFDM_SYMB_TO_SEARCH (NUM_SLOT_TO_SEARCH*MAX_NUM_SYMB_PER_SLOT)
-#define NUM_SYMB_OF_PSS_SSS     (62)
-#define MAX_CELL_PER_FREQ       (10)
-#define MAX_N_PSS               (20)             // estimation of matlab_range(peak_loc,k_factor*9600,(double)capbuf.length()-125-9)
-#define MAX_N_SSS               (20)             // just an estimation
-#define THRESH2_N_SIGMA         (3)
-#define MAX_CELL_PER_FREQ       (10)
+#define MAX_CAPTURE_SIZE            (153600)
+#define NUM_SLOT_TO_SEARCH          (6*10*2+2)
+#define MAX_NUM_SYMB_PER_SLOT       (7)
+#define NUM_OFDM_SYMB_TO_SEARCH     (NUM_SLOT_TO_SEARCH*MAX_NUM_SYMB_PER_SLOT)
+#define NUM_SYMB_OF_PSS_SSS         (62)
+#define MAX_CELL_PER_FREQ           (10)
+#define MAX_N_PSS                   (20)             // estimation of matlab_range(peak_loc,k_factor*9600,(double)capbuf.length()-125-9)
+#define MAX_N_SSS                   (20)             // just an estimation
+#define THRESH2_N_SIGMA             (3)
+#define MAX_CELL_PER_FREQ           (10)
 
-#define FFT_SIZE                (128)
-#define SQRT2_INV               (0.7071067817811865475)
-#define SQRT62_INV              (0.1270001270001905)
-#define SQRT128_INV             (0.0883883476483184)
-#define LOG10_0p8               (0.1584893192461113)
-#define LOG10_1p2               (0.0630957344480193)
-#define COMPLEX_MUL_REAL(a, b)  ((a).x * (b).x - (a).y * (b).y)
-#define COMPLEX_MUL_IMAG(a, b)  ((a).x * (b).y + (a).y * (b).x)
+#define FFT_SIZE                    (128)
+#define SQRT2_INV                   (0.7071067817811865475)
+#define SQRT62_INV                  (0.1270001270001905)
+#define SQRT128_INV                 (0.0883883476483184)
+#define ONE_SIXTH                   (0.1666666666666667)
+#define LOG10_0p8                   (0.1584893192461113)
+#define LOG10_1p2                   (0.0630957344480193)
+#define CMPLX_A_MUL_B_r(a, b)       ((a).x * (b).x - (a).y * (b).y)
+#define CMPLX_A_MUL_B_i(a, b)       ((a).x * (b).y + (a).y * (b).x)
+#define CMPLX_A_MUL_CONJ_B_r(a, b)  ((a).x * (b).x + (a).y * (b).y)
+#define CMPLX_A_MUL_CONJ_B_i(a, b)  ((a).y * (b).x - (a).x * (b).y)
+#define CMPLX_SQR(a)                ((a).x * (a).x + (a).y * (a).y)
 
 #undef SWAP
-#define SWAP(x,y)               do { typeof (x) __tmp = (x); (x) = (y); (y) = (__tmp); } while (0)
+#define SWAP(x,y)                   do { typeof (x) __tmp = (x); (x) = (y); (y) = (__tmp); } while (0)
 
 __constant__ cuDoubleComplex pss_fd[3][62];
 __constant__ cuDoubleComplex pss_td[3][256];
@@ -158,7 +162,7 @@ typedef struct {
     /* used in chan_est() */
     cuDoubleComplex  ce_filt[NUM_SLOT_TO_SEARCH * 12 * 6]; // for 4 antenna port case : there are 2+2+1+1 reference symbols in one slot
     double           err_pwr_acc[NUM_SLOT_TO_SEARCH * 6];
-    double           np[4];
+    double           np_v[4];
 } LTE_DECODE_AUX_DATA;
 
 
@@ -400,11 +404,11 @@ __global__ void xc_correlate_step1_kernel(cuDoubleComplex *d_capbuf, double *d_x
 
     __syncthreads();
 
-    real = COMPLEX_MUL_REAL(s_fshift_pss[0], s_capbuf[tid]);
-    imag = COMPLEX_MUL_IMAG(s_fshift_pss[0], s_capbuf[tid]);
+    real = CMPLX_A_MUL_B_r(s_fshift_pss[0], s_capbuf[tid]);
+    imag = CMPLX_A_MUL_B_i(s_fshift_pss[0], s_capbuf[tid]);
     for (unsigned int i = 1; i < 137; i++) {
-        real += COMPLEX_MUL_REAL(s_fshift_pss[i], s_capbuf[tid + i]);
-        imag += COMPLEX_MUL_IMAG(s_fshift_pss[i], s_capbuf[tid + i]);
+        real += CMPLX_A_MUL_B_r(s_fshift_pss[i], s_capbuf[tid + i]);
+        imag += CMPLX_A_MUL_B_i(s_fshift_pss[i], s_capbuf[tid + i]);
     }
     d_xc_sqr[256 * bid + tid] = (real * real + imag * imag) / (137.0*137.0);
 }
@@ -703,7 +707,6 @@ extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
     const unsigned int n_cap = capbuf.length() < MAX_CAPTURE_SIZE ? capbuf.length() : MAX_CAPTURE_SIZE;
     const unsigned int n_f = f_search_set.length();
     const unsigned int n_comb_xc = (n_cap - 100) / 9600;
-    const unsigned int n_comb_sp = (n_cap - 136 - 137) / 9600;
 
     double *h_f_search_set = (double *)NULL, *d_f_search_set = (double *)NULL;
 
@@ -854,19 +857,19 @@ __global__ void sss_detect_getce_sss_multiblocks_step1_kernel(cuDoubleComplex *d
 
     // implement extract_psss(capbuf.mid(pss_dft_location, 128), -cell_in.freq, k_factor, fs_programmed)
     if (tid < 2) {
-        s_pss_dft[126 + tid].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location + tid], shift);
-        s_pss_dft[126 + tid].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location + tid], shift);
-        s_nrm_sss_dft[126 + tid].x = COMPLEX_MUL_REAL(d_capbuf[nrm_sss_dft_location + tid], shift);
-        s_nrm_sss_dft[126 + tid].y = COMPLEX_MUL_IMAG(d_capbuf[nrm_sss_dft_location + tid], shift);
-        s_ext_sss_dft[126 + tid].x = COMPLEX_MUL_REAL(d_capbuf[ext_sss_dft_location + tid], shift);
-        s_ext_sss_dft[126 + tid].y = COMPLEX_MUL_IMAG(d_capbuf[ext_sss_dft_location + tid], shift);
+        s_pss_dft[126 + tid].x = CMPLX_A_MUL_B_r(d_capbuf[pss_dft_location + tid], shift);
+        s_pss_dft[126 + tid].y = CMPLX_A_MUL_B_i(d_capbuf[pss_dft_location + tid], shift);
+        s_nrm_sss_dft[126 + tid].x = CMPLX_A_MUL_B_r(d_capbuf[nrm_sss_dft_location + tid], shift);
+        s_nrm_sss_dft[126 + tid].y = CMPLX_A_MUL_B_i(d_capbuf[nrm_sss_dft_location + tid], shift);
+        s_ext_sss_dft[126 + tid].x = CMPLX_A_MUL_B_r(d_capbuf[ext_sss_dft_location + tid], shift);
+        s_ext_sss_dft[126 + tid].y = CMPLX_A_MUL_B_i(d_capbuf[ext_sss_dft_location + tid], shift);
     } else if (tid < 128) {
-        s_pss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location + tid], shift);
-        s_pss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location + tid], shift);
-        s_nrm_sss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[nrm_sss_dft_location + tid], shift);
-        s_nrm_sss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[nrm_sss_dft_location + tid], shift);
-        s_ext_sss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[ext_sss_dft_location + tid], shift);
-        s_ext_sss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[ext_sss_dft_location + tid], shift);
+        s_pss_dft[tid - 2].x = CMPLX_A_MUL_B_r(d_capbuf[pss_dft_location + tid], shift);
+        s_pss_dft[tid - 2].y = CMPLX_A_MUL_B_i(d_capbuf[pss_dft_location + tid], shift);
+        s_nrm_sss_dft[tid - 2].x = CMPLX_A_MUL_B_r(d_capbuf[nrm_sss_dft_location + tid], shift);
+        s_nrm_sss_dft[tid - 2].y = CMPLX_A_MUL_B_i(d_capbuf[nrm_sss_dft_location + tid], shift);
+        s_ext_sss_dft[tid - 2].x = CMPLX_A_MUL_B_r(d_capbuf[ext_sss_dft_location + tid], shift);
+        s_ext_sss_dft[tid - 2].y = CMPLX_A_MUL_B_i(d_capbuf[ext_sss_dft_location + tid], shift);
     }
 
     __syncthreads();
@@ -886,12 +889,12 @@ __global__ void sss_detect_getce_sss_multiblocks_step1_kernel(cuDoubleComplex *d
     // pss_fd  :  0,  1, ....  30, 31, 32, 33, ..., 61
 
     if (tid < 31) {
-        h_raw[tid].x = SQRT128_INV * (s_pss_dft[tid + 97].x * p_pss_fd[tid].x + s_pss_dft[tid + 97].y * p_pss_fd[tid].y);
-        h_raw[tid].y = SQRT128_INV * (s_pss_dft[tid + 97].y * p_pss_fd[tid].x - s_pss_dft[tid + 97].x * p_pss_fd[tid].y);
+        h_raw[tid].x = SQRT128_INV * CMPLX_A_MUL_CONJ_B_r(s_pss_dft[tid + 97], p_pss_fd[tid]);
+        h_raw[tid].y = SQRT128_INV * CMPLX_A_MUL_CONJ_B_i(s_pss_dft[tid + 97], p_pss_fd[tid]);
     } else if (tid < 62) {
         // concat(dft_out.right(31), dft_out.mid(1,31)) * conj(pss_fd)
-        h_raw[tid].x = SQRT128_INV * (s_pss_dft[tid - 30].x * p_pss_fd[tid].x + s_pss_dft[tid - 30].y * p_pss_fd[tid].y);
-        h_raw[tid].y = SQRT128_INV * (s_pss_dft[tid - 30].y * p_pss_fd[tid].x - s_pss_dft[tid - 30].x * p_pss_fd[tid].y);
+        h_raw[tid].x = SQRT128_INV * CMPLX_A_MUL_CONJ_B_r(s_pss_dft[tid - 30], p_pss_fd[tid]);
+        h_raw[tid].y = SQRT128_INV * CMPLX_A_MUL_CONJ_B_i(s_pss_dft[tid - 30], p_pss_fd[tid]);
     }
 
     __syncthreads();
@@ -1023,7 +1026,7 @@ __global__ void sss_detect_getce_sss_multiblocks_step2_kernel(int n_pss,
     //      ....
     //  }
 
-    double sqr_sm_pss_np_inv = (h_sm[tid].x * h_sm[tid].x + h_sm[tid].y * h_sm[tid].y) * pss_np_inv[tid];
+    double sqr_sm_pss_np_inv = CMPLX_SQR(h_sm[tid]) * pss_np_inv[tid];
 
     atomicAdd(&sum_of_sqr_sm_pss_np_inv[tid & 1], (float)(sqr_sm_pss_np_inv));
 
@@ -1060,10 +1063,10 @@ __global__ void sss_detect_getce_sss_multiblocks_step2_kernel(int n_pss,
 
     nrm_real = nrm_imag = ext_real = ext_imag = sss_np_est[tid & 1] * pss_np_inv[tid];
 
-    nrm_real *= (h_sm[tid].x * sss_nrm_raw[tid].x + h_sm[tid].y * sss_nrm_raw[tid].y);
-    nrm_imag *= (h_sm[tid].x * sss_nrm_raw[tid].y - h_sm[tid].y * sss_nrm_raw[tid].x);
-    ext_real *= (h_sm[tid].x * sss_ext_raw[tid].x + h_sm[tid].y * sss_ext_raw[tid].y);
-    ext_imag *= (h_sm[tid].x * sss_ext_raw[tid].y - h_sm[tid].y * sss_ext_raw[tid].x);
+    nrm_real *= CMPLX_A_MUL_CONJ_B_r(sss_nrm_raw[tid], h_sm[tid]);
+    nrm_imag *= CMPLX_A_MUL_CONJ_B_i(sss_nrm_raw[tid], h_sm[tid]);
+    ext_real *= CMPLX_A_MUL_CONJ_B_r(sss_ext_raw[tid], h_sm[tid]);
+    ext_imag *= CMPLX_A_MUL_CONJ_B_i(sss_ext_raw[tid], h_sm[tid]);
 
     atomicAdd(&sss_h12_nrm_est_real[tid & 1], (float)nrm_real);
     atomicAdd(&sss_h12_nrm_est_imag[tid & 1], (float)nrm_imag);
@@ -1126,15 +1129,15 @@ __global__ void sss_detect_getce_sss_singleblock_kernel(cuDoubleComplex *d_capbu
     for (unsigned int t = pss_dft_location + 2, i = 2; i < 128; i++, t++) {
         /* 128 points data shift, so k multiply from 0 to 125 */
 
-        s_capbuf[i - 2].x = COMPLEX_MUL_REAL(d_capbuf[t], shift[i]);
-        s_capbuf[i - 2].y = COMPLEX_MUL_IMAG(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].x = CMPLX_A_MUL_B_r(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].y = CMPLX_A_MUL_B_i(d_capbuf[t], shift[i]);
     }
 
     // time shift 2 points
-    s_capbuf[126].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location], shift[0]);
-    s_capbuf[126].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location], shift[0]);
-    s_capbuf[127].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location + 1], shift[1]);
-    s_capbuf[127].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location + 1], shift[1]);
+    s_capbuf[126].x = CMPLX_A_MUL_B_r(d_capbuf[pss_dft_location], shift[0]);
+    s_capbuf[126].y = CMPLX_A_MUL_B_i(d_capbuf[pss_dft_location], shift[0]);
+    s_capbuf[127].x = CMPLX_A_MUL_B_r(d_capbuf[pss_dft_location + 1], shift[1]);
+    s_capbuf[127].y = CMPLX_A_MUL_B_i(d_capbuf[pss_dft_location + 1], shift[1]);
 
     kernel_fft_radix2(s_capbuf, 128);
 
@@ -1145,11 +1148,11 @@ __global__ void sss_detect_getce_sss_singleblock_kernel(cuDoubleComplex *d_capbu
     for (unsigned int i = 1; i <= 31; i++) {
         // concat(dft_out.right(31), dft_out.mid(1,31)) * conj(pss_fd)
 
-        h_raw[i + 30].x = SQRT128_INV * (s_capbuf[i].x * p_pss_fd[i + 30].x + s_capbuf[i].y * p_pss_fd[i + 30].y);
-        h_raw[i + 30].y = SQRT128_INV * (s_capbuf[i].y * p_pss_fd[i + 30].x - s_capbuf[i].x * p_pss_fd[i + 30].y);
+        h_raw[i + 30].x = SQRT128_INV * CMPLX_A_MUL_CONJ_B_r(s_capbuf[i], p_pss_fd[i + 30]);
+        h_raw[i + 30].y = SQRT128_INV * CMPLX_A_MUL_CONJ_B_i(s_capbuf[i], p_pss_fd[i + 30]);
 
-        h_raw[i - 1].x = SQRT128_INV * (s_capbuf[i + 96].x * p_pss_fd[i - 1].x + s_capbuf[i + 96].y * p_pss_fd[i - 1].y);
-        h_raw[i - 1].y = SQRT128_INV * (s_capbuf[i + 96].y * p_pss_fd[i - 1].x - s_capbuf[i + 96].x * p_pss_fd[i - 1].y);
+        h_raw[i - 1].x  = SQRT128_INV * CMPLX_A_MUL_CONJ_B_r(s_capbuf[i + 96], p_pss_fd[i - 1]);
+        h_raw[i - 1].y  = SQRT128_INV * CMPLX_A_MUL_CONJ_B_i(s_capbuf[i + 96], p_pss_fd[i - 1]);
     }
 
     // Smoothing... Basic...
@@ -1249,15 +1252,15 @@ __global__ void sss_detect_getce_sss_singleblock_kernel(cuDoubleComplex *d_capbu
     for (unsigned int t = ext_sss_dft_location + 2, i = 2; i < 128; i++, t++) {
         /* 128 points data shift, so k multiply from 0 to 125 */
 
-        s_capbuf[i - 2].x = COMPLEX_MUL_REAL(d_capbuf[t], shift[i]);
-        s_capbuf[i - 2].y = COMPLEX_MUL_IMAG(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].x = CMPLX_A_MUL_B_r(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].y = CMPLX_A_MUL_B_i(d_capbuf[t], shift[i]);
     }
 
     // time shift 2 points
-    s_capbuf[126].x = COMPLEX_MUL_REAL(d_capbuf[ext_sss_dft_location], shift[0]);
-    s_capbuf[126].y = COMPLEX_MUL_IMAG(d_capbuf[ext_sss_dft_location], shift[0]);
-    s_capbuf[127].x = COMPLEX_MUL_REAL(d_capbuf[ext_sss_dft_location + 1], shift[1]);
-    s_capbuf[127].y = COMPLEX_MUL_IMAG(d_capbuf[ext_sss_dft_location + 1], shift[1]);
+    s_capbuf[126].x = CMPLX_A_MUL_B_r(d_capbuf[ext_sss_dft_location], shift[0]);
+    s_capbuf[126].y = CMPLX_A_MUL_B_i(d_capbuf[ext_sss_dft_location], shift[0]);
+    s_capbuf[127].x = CMPLX_A_MUL_B_r(d_capbuf[ext_sss_dft_location + 1], shift[1]);
+    s_capbuf[127].y = CMPLX_A_MUL_B_i(d_capbuf[ext_sss_dft_location + 1], shift[1]);
 
     kernel_fft_radix2(s_capbuf, 128);
 
@@ -1304,15 +1307,15 @@ __global__ void sss_detect_getce_sss_singleblock_kernel(cuDoubleComplex *d_capbu
 
     const unsigned int nrm_sss_dft_location = pss_dft_location - 128 - 9;
     for (unsigned int t = nrm_sss_dft_location + 2, i = 2; i < 128; i++, t++) {
-        s_capbuf[i - 2].x = COMPLEX_MUL_REAL(d_capbuf[t], shift[i]);
-        s_capbuf[i - 2].y = COMPLEX_MUL_IMAG(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].x = CMPLX_A_MUL_B_r(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].y = CMPLX_A_MUL_B_i(d_capbuf[t], shift[i]);
     }
 
     // time shift 2 points
-    s_capbuf[126].x = COMPLEX_MUL_REAL(d_capbuf[nrm_sss_dft_location], shift[0]);
-    s_capbuf[126].y = COMPLEX_MUL_IMAG(d_capbuf[nrm_sss_dft_location], shift[0]);
-    s_capbuf[127].x = COMPLEX_MUL_REAL(d_capbuf[nrm_sss_dft_location + 1], shift[1]);
-    s_capbuf[127].y = COMPLEX_MUL_IMAG(d_capbuf[nrm_sss_dft_location + 1], shift[1]);
+    s_capbuf[126].x = CMPLX_A_MUL_B_r(d_capbuf[nrm_sss_dft_location], shift[0]);
+    s_capbuf[126].y = CMPLX_A_MUL_B_i(d_capbuf[nrm_sss_dft_location], shift[0]);
+    s_capbuf[127].x = CMPLX_A_MUL_B_r(d_capbuf[nrm_sss_dft_location + 1], shift[1]);
+    s_capbuf[127].y = CMPLX_A_MUL_B_i(d_capbuf[nrm_sss_dft_location + 1], shift[1]);
 
     kernel_fft_radix2(s_capbuf, 128);
 
@@ -1629,9 +1632,10 @@ __global__ void pss_sss_foe_multiblocks_step1_kernel(cuDoubleComplex *d_capbuf, 
         pss_np = M_real = M_imag = 0.0;
 
         // exp(J*pi*(-cell_in.freq)/(FS_LTE/16/2)*(-pss_sss_dist))
+        double theta = CUDART_PI * freq / (FS_LTE / 16 / 2) * pss_sss_dist;
 
-        coeff.x = cos(CUDART_PI * freq / (FS_LTE / 16 / 2) * pss_sss_dist);
-        coeff.y = sin(CUDART_PI * freq / (FS_LTE / 16 / 2) * pss_sss_dist);
+        coeff.x = cos(theta);
+        coeff.y = sin(theta);
     }
 
     p_pss_fd = (cuDoubleComplex *)&pss_fd[n_id_2];
@@ -1645,15 +1649,15 @@ __global__ void pss_sss_foe_multiblocks_step1_kernel(cuDoubleComplex *d_capbuf, 
     __syncthreads();
 
     if (tid < 2) {
-        s_pss_dft[tid + 126].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location + tid], shift);
-        s_pss_dft[tid + 126].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location + tid], shift);
-        s_sss_dft[tid + 126].x = COMPLEX_MUL_REAL(d_capbuf[sss_dft_location + tid], shift);
-        s_sss_dft[tid + 126].y = COMPLEX_MUL_IMAG(d_capbuf[sss_dft_location + tid], shift);
+        s_pss_dft[tid + 126].x = CMPLX_A_MUL_B_r(d_capbuf[pss_dft_location + tid], shift);
+        s_pss_dft[tid + 126].y = CMPLX_A_MUL_B_i(d_capbuf[pss_dft_location + tid], shift);
+        s_sss_dft[tid + 126].x = CMPLX_A_MUL_B_r(d_capbuf[sss_dft_location + tid], shift);
+        s_sss_dft[tid + 126].y = CMPLX_A_MUL_B_i(d_capbuf[sss_dft_location + tid], shift);
     } else if (tid < 128) {
-        s_pss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location + tid], shift);
-        s_pss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location + tid], shift);
-        s_sss_dft[tid - 2].x = COMPLEX_MUL_REAL(d_capbuf[sss_dft_location + tid], shift);
-        s_sss_dft[tid - 2].y = COMPLEX_MUL_IMAG(d_capbuf[sss_dft_location + tid], shift);
+        s_pss_dft[tid - 2].x = CMPLX_A_MUL_B_r(d_capbuf[pss_dft_location + tid], shift);
+        s_pss_dft[tid - 2].y = CMPLX_A_MUL_B_i(d_capbuf[pss_dft_location + tid], shift);
+        s_sss_dft[tid - 2].x = CMPLX_A_MUL_B_r(d_capbuf[sss_dft_location + tid], shift);
+        s_sss_dft[tid - 2].y = CMPLX_A_MUL_B_i(d_capbuf[sss_dft_location + tid], shift);
     }
 
     __syncthreads();
@@ -1676,17 +1680,17 @@ __global__ void pss_sss_foe_multiblocks_step1_kernel(cuDoubleComplex *d_capbuf, 
     if (tid < 31) {
         sss_fd_bit = (p_sss_fd[0] >> tid) & 1;
 
-        h_raw_fo_pss[tid].x = SQRT128_INV * (s_pss_dft[tid + 97].x * p_pss_fd[tid].x + s_pss_dft[tid + 97].y * p_pss_fd[tid].y);
-        h_raw_fo_pss[tid].y = SQRT128_INV * (s_pss_dft[tid + 97].y * p_pss_fd[tid].x - s_pss_dft[tid + 97].x * p_pss_fd[tid].y);
-        sss_raw_fo[tid].x = SQRT128_INV * COMPLEX_MUL_REAL(s_sss_dft[tid + 97], coeff);
-        sss_raw_fo[tid].y = SQRT128_INV * COMPLEX_MUL_IMAG(s_sss_dft[tid + 97], coeff);
+        h_raw_fo_pss[tid].x = SQRT128_INV * CMPLX_A_MUL_CONJ_B_r(s_pss_dft[tid + 97], p_pss_fd[tid]);
+        h_raw_fo_pss[tid].y = SQRT128_INV * CMPLX_A_MUL_CONJ_B_i(s_pss_dft[tid + 97], p_pss_fd[tid]);
+        sss_raw_fo[tid].x   = SQRT128_INV * CMPLX_A_MUL_B_r(s_sss_dft[tid + 97], coeff);
+        sss_raw_fo[tid].y   = SQRT128_INV * CMPLX_A_MUL_B_i(s_sss_dft[tid + 97], coeff);
     } else if (tid < 62) {
         sss_fd_bit = ((p_sss_fd[1] >> (tid - 31)) & 1);
 
-        h_raw_fo_pss[tid].x = SQRT128_INV * (s_pss_dft[tid - 30].x * p_pss_fd[tid].x + s_pss_dft[tid - 30].y * p_pss_fd[tid].y);
-        h_raw_fo_pss[tid].y = SQRT128_INV * (s_pss_dft[tid - 30].y * p_pss_fd[tid].x - s_pss_dft[tid - 30].x * p_pss_fd[tid].y);
-        sss_raw_fo[tid].x = SQRT128_INV * COMPLEX_MUL_REAL(s_sss_dft[tid - 30], coeff);
-        sss_raw_fo[tid].y = SQRT128_INV * COMPLEX_MUL_IMAG(s_sss_dft[tid - 30], coeff);
+        h_raw_fo_pss[tid].x = SQRT128_INV * CMPLX_A_MUL_CONJ_B_r(s_pss_dft[tid - 30], p_pss_fd[tid]);
+        h_raw_fo_pss[tid].y = SQRT128_INV * CMPLX_A_MUL_CONJ_B_i(s_pss_dft[tid - 30], p_pss_fd[tid]);
+        sss_raw_fo[tid].x   = SQRT128_INV * CMPLX_A_MUL_B_r(s_sss_dft[tid - 30], coeff);
+        sss_raw_fo[tid].y   = SQRT128_INV * CMPLX_A_MUL_B_i(s_sss_dft[tid - 30], coeff);
     }
 
     __syncthreads();
@@ -1752,11 +1756,11 @@ __global__ void pss_sss_foe_multiblocks_step1_kernel(cuDoubleComplex *d_capbuf, 
  
         // elem_mult(conj(sss_raw_fo), h_raw_fo_pss, to_cvec(elem_mult(sqr(h_sm), 1.0/(2*sqr(h_sm)*pss_np+sqr(pss_np))
 
-        double sqr_sm = (acc.x * acc.x + acc.y * acc.y);
+        double sqr_sm = CMPLX_SQR(acc);
         imag = real = (sqr_sm * 62) / ((2 * sqr_sm * pss_np) + (pss_np * pss_np / 62));
 
-        real *= COMPLEX_MUL_REAL(sss_raw_fo[tid], h_raw_fo_pss[tid]);
-        imag *= COMPLEX_MUL_IMAG(sss_raw_fo[tid], h_raw_fo_pss[tid]);
+        real *= CMPLX_A_MUL_B_r(sss_raw_fo[tid], h_raw_fo_pss[tid]);
+        imag *= CMPLX_A_MUL_B_i(sss_raw_fo[tid], h_raw_fo_pss[tid]);
 
         atomicAdd(&M_real, (float)real);
         atomicAdd(&M_imag, (float)imag);
@@ -1850,9 +1854,10 @@ __global__ void pss_sss_foe_singleblock_kernel(cuDoubleComplex *d_capbuf, int n_
         M_real = 0.0; M_imag = 0.0;
 
         // exp(J*pi*(-cell_in.freq)/(FS_LTE/16/2)*(-pss_sss_dist))
+        double theta = CUDART_PI * freq / (FS_LTE / 16 / 2) * pss_sss_dist;
 
-        coeff.x = cos(CUDART_PI * freq / (FS_LTE / 16 / 2) * pss_sss_dist);
-        coeff.y = sin(CUDART_PI * freq / (FS_LTE / 16 / 2) * pss_sss_dist);
+        coeff.x = cos(theta);
+        coeff.y = sin(theta);
 
         p_pss_fd = (cuDoubleComplex *)&pss_fd[n_id_2];
     }
@@ -1872,15 +1877,15 @@ __global__ void pss_sss_foe_singleblock_kernel(cuDoubleComplex *d_capbuf, int n_
     for (unsigned int t = pss_dft_location + 2, i = 2; i < 128; i++, t++) {
         /* 128 points data shift, so k multiply from 0 to 125 */
 
-        s_capbuf[i - 2].x = COMPLEX_MUL_REAL(d_capbuf[t], shift[i]);
-        s_capbuf[i - 2].y = COMPLEX_MUL_IMAG(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].x = CMPLX_A_MUL_B_r(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].y = CMPLX_A_MUL_B_i(d_capbuf[t], shift[i]);
     }
 
     // time shift 2 points
-    s_capbuf[126].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location], shift[0]);
-    s_capbuf[126].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location], shift[0]);
-    s_capbuf[127].x = COMPLEX_MUL_REAL(d_capbuf[pss_dft_location + 1], shift[1]);
-    s_capbuf[127].y = COMPLEX_MUL_IMAG(d_capbuf[pss_dft_location + 1], shift[1]);
+    s_capbuf[126].x = CMPLX_A_MUL_B_r(d_capbuf[pss_dft_location], shift[0]);
+    s_capbuf[126].y = CMPLX_A_MUL_B_i(d_capbuf[pss_dft_location], shift[0]);
+    s_capbuf[127].x = CMPLX_A_MUL_B_r(d_capbuf[pss_dft_location + 1], shift[1]);
+    s_capbuf[127].y = CMPLX_A_MUL_B_i(d_capbuf[pss_dft_location + 1], shift[1]);
 
     kernel_fft_radix2(s_capbuf, 128);
 
@@ -1893,11 +1898,11 @@ __global__ void pss_sss_foe_singleblock_kernel(cuDoubleComplex *d_capbuf, int n_
     for (unsigned int i = 1; i <= 31; i++) {
         // concat(dft_out.right(31), dft_out.mid(1,31)) * conj(pss_fd)
 
-        h_raw_fo_pss[i + 30].x = SQRT128_INV * (s_capbuf[i].x * p_pss_fd[i + 30].x + s_capbuf[i].y * p_pss_fd[i + 30].y);
-        h_raw_fo_pss[i + 30].y = SQRT128_INV * (s_capbuf[i].y * p_pss_fd[i + 30].x - s_capbuf[i].x * p_pss_fd[i + 30].y);
+        h_raw_fo_pss[i + 30].x = SQRT128_INV * CMPLX_A_MUL_B_r(s_capbuf[i], p_pss_fd[i + 30]);
+        h_raw_fo_pss[i + 30].y = SQRT128_INV * CMPLX_A_MUL_B_i(s_capbuf[i], p_pss_fd[i + 30]);
 
-        h_raw_fo_pss[i - 1].x = SQRT128_INV * (s_capbuf[i + 96].x * p_pss_fd[i - 1].x + s_capbuf[i + 96].y * p_pss_fd[i - 1].y);
-        h_raw_fo_pss[i - 1].y = SQRT128_INV * (s_capbuf[i + 96].y * p_pss_fd[i - 1].x - s_capbuf[i + 96].x * p_pss_fd[i - 1].y);
+        h_raw_fo_pss[i - 1].x  = SQRT128_INV * CMPLX_A_MUL_B_r(s_capbuf[i + 96], p_pss_fd[i - 1]);
+        h_raw_fo_pss[i - 1].y  = SQRT128_INV * CMPLX_A_MUL_B_i(s_capbuf[i + 96], p_pss_fd[i - 1]);
     }
 
     // Smoothing... Basic...
@@ -1954,14 +1959,14 @@ __global__ void pss_sss_foe_singleblock_kernel(cuDoubleComplex *d_capbuf, int n_
     for (unsigned int t = sss_dft_location + 2, i = 2; i < 128; i++, t++) {
         /* 128 points data shift, so k multiply from 0 to 125 */
 
-        s_capbuf[i - 2].x = COMPLEX_MUL_REAL(d_capbuf[t], shift[i]);
-        s_capbuf[i - 2].y = COMPLEX_MUL_IMAG(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].x = CMPLX_A_MUL_B_r(d_capbuf[t], shift[i]);
+        s_capbuf[i - 2].y = CMPLX_A_MUL_B_i(d_capbuf[t], shift[i]);
     }
 
-    s_capbuf[126].x = COMPLEX_MUL_REAL(d_capbuf[sss_dft_location], shift[0]);
-    s_capbuf[126].y = COMPLEX_MUL_IMAG(d_capbuf[sss_dft_location], shift[0]);
-    s_capbuf[127].x = COMPLEX_MUL_REAL(d_capbuf[sss_dft_location + 1], shift[1]);
-    s_capbuf[127].y = COMPLEX_MUL_IMAG(d_capbuf[sss_dft_location + 1], shift[1]);
+    s_capbuf[126].x = CMPLX_A_MUL_B_r(d_capbuf[sss_dft_location], shift[0]);
+    s_capbuf[126].y = CMPLX_A_MUL_B_i(d_capbuf[sss_dft_location], shift[0]);
+    s_capbuf[127].x = CMPLX_A_MUL_B_r(d_capbuf[sss_dft_location + 1], shift[1]);
+    s_capbuf[127].y = CMPLX_A_MUL_B_i(d_capbuf[sss_dft_location + 1], shift[1]);
 
     kernel_fft_radix2(s_capbuf, 128);
 
@@ -1980,7 +1985,7 @@ __global__ void pss_sss_foe_singleblock_kernel(cuDoubleComplex *d_capbuf, int n_
 
         // index = 0, 1 ... 31 of sss_raw_fo
 
-        sm_power = (h_sm[i - 1].x * h_sm[i - 1].x + h_sm[i - 1].y * h_sm[i - 1].y);
+        sm_power = CMPLX_SQR(h_sm[i - 1]);
         sm_power = SQRT128_INV * sm_power / (2 * sm_power * pss_np + pss_np * pss_np);
 
         if (word1 & 1) sm_power *= -1.0;
@@ -1989,17 +1994,17 @@ __global__ void pss_sss_foe_singleblock_kernel(cuDoubleComplex *d_capbuf, int n_
 
         // conj( .* exp(J*pi*(-cell_in.freq)/(FS_LTE/16/2)*(-pss_sss_dist)))
 
-        sss_raw_fo.x = COMPLEX_MUL_REAL(s_capbuf[i + 96], coeff);
-        sss_raw_fo.y = -COMPLEX_MUL_IMAG(s_capbuf[i + 96], coeff);
+        sss_raw_fo.x =  CMPLX_A_MUL_B_r(s_capbuf[i + 96], coeff);
+        sss_raw_fo.y = -CMPLX_A_MUL_B_i(s_capbuf[i + 96], coeff);
 
         // .* h_raw_fo_pss
 
-        M.x += sm_power * COMPLEX_MUL_REAL(sss_raw_fo, h_raw_fo_pss[i - 1]);
-        M.y += sm_power * COMPLEX_MUL_IMAG(sss_raw_fo, h_raw_fo_pss[i - 1]);
+        M.x += sm_power * CMPLX_A_MUL_B_r(sss_raw_fo, h_raw_fo_pss[i - 1]);
+        M.y += sm_power * CMPLX_A_MUL_B_i(sss_raw_fo, h_raw_fo_pss[i - 1]);
 
         // index = 32, 33 ... 61 of sss_raw_fo
 
-        sm_power = (h_sm[i + 30].x * h_sm[i + 30].x + h_sm[i + 30].y * h_sm[i + 30].y);
+        sm_power = CMPLX_SQR(h_sm[i + 30]);
         sm_power = SQRT128_INV * sm_power / (2 * sm_power * pss_np + pss_np * pss_np);
 
         if (word2 & 1) sm_power *= -1.0;
@@ -2008,13 +2013,13 @@ __global__ void pss_sss_foe_singleblock_kernel(cuDoubleComplex *d_capbuf, int n_
 
         // conj( .* exp(J*pi*(-cell_in.freq)/(FS_LTE/16/2)*(-pss_sss_dist)))
 
-        sss_raw_fo.x = COMPLEX_MUL_REAL(s_capbuf[i], coeff);
-        sss_raw_fo.y = -COMPLEX_MUL_IMAG(s_capbuf[i], coeff);
+        sss_raw_fo.x =  CMPLX_A_MUL_B_r(s_capbuf[i], coeff);
+        sss_raw_fo.y = -CMPLX_A_MUL_B_i(s_capbuf[i], coeff);
 
         // .* h_raw_fo_pss
 
-        M.x += sm_power * COMPLEX_MUL_REAL(sss_raw_fo, h_raw_fo_pss[i + 30]);
-        M.y += sm_power * COMPLEX_MUL_IMAG(sss_raw_fo, h_raw_fo_pss[i + 30]);
+        M.x += sm_power * CMPLX_A_MUL_B_r(sss_raw_fo, h_raw_fo_pss[i + 30]);
+        M.y += sm_power * CMPLX_A_MUL_B_i(sss_raw_fo, h_raw_fo_pss[i + 30]);
     }
 
     real = 1.0 * M.x;
@@ -2182,9 +2187,9 @@ __device__ void pn_seq_msb_to_lsb(unsigned int d_init_in, unsigned int d_seq_len
 /*
  *
  */
-__global__ void extract_tfg_multiblocks_kernel(cuDoubleComplex *d_capbuf, cuDoubleComplex *d_tfg, double *d_tfg_timestamp, double *d_adjust_f,
+__global__ void extract_tfg_multiblocks_kernel(cuDoubleComplex *d_capbuf, cuDoubleComplex *d_tfg, double *d_tfg_timestamp,
                                                unsigned short n_id_cell, int n_symb_dl, double frame_start,
-                                               double fc_requested, double fc_programmed, double fs_programmed, double freq)
+                                               double fc_requested, double fc_programmed, double fs_programmed, double freq_fine)
 {
     __shared__ cuDoubleComplex s_capbuf[128];
 
@@ -2192,7 +2197,6 @@ __global__ void extract_tfg_multiblocks_kernel(cuDoubleComplex *d_capbuf, cuDoub
     const unsigned int bid = blockIdx.x;
 
     int dft_location_i;
-    double freq_fine = freq + *d_adjust_f;
     const double k_factor = (fc_requested - freq_fine) / fc_programmed;
     double dft_location = frame_start + ((n_symb_dl == 6) ? 32 : 10) * 16 / FS_LTE * fs_programmed * k_factor;
     cuDoubleComplex shift, coeff;
@@ -2210,8 +2214,8 @@ __global__ void extract_tfg_multiblocks_kernel(cuDoubleComplex *d_capbuf, cuDoub
     shift.x = cos(theta);
     shift.y = sin(theta);
 
-    s_capbuf[tid].x = COMPLEX_MUL_REAL(d_capbuf[dft_location_i + tid], shift);
-    s_capbuf[tid].y = COMPLEX_MUL_IMAG(d_capbuf[dft_location_i + tid], shift);
+    s_capbuf[tid].x = CMPLX_A_MUL_B_r(d_capbuf[dft_location_i + tid], shift);
+    s_capbuf[tid].y = CMPLX_A_MUL_B_i(d_capbuf[dft_location_i + tid], shift);
 
     __syncthreads();
 
@@ -2236,17 +2240,19 @@ __global__ void extract_tfg_multiblocks_kernel(cuDoubleComplex *d_capbuf, cuDoub
     double late = dft_location_i - dft_location;
 
     if (tid < 36) {
-        coeff.x =  cos(2 * CUDART_PI * late * (36 - tid) / 128);
-        coeff.y =  sin(2 * CUDART_PI * late * (36 - tid) / 128);
+        theta   = 2 * CUDART_PI * late * (36 - tid) / 128;
+        coeff.x = cos(theta);
+        coeff.y = sin(theta);
 
-        d_tfg[bid * 72 + tid].x = SQRT128_INV * COMPLEX_MUL_REAL(s_capbuf[tid + 92], coeff);
-        d_tfg[bid * 72 + tid].y = SQRT128_INV * COMPLEX_MUL_IMAG(s_capbuf[tid + 92], coeff);
+        d_tfg[bid * 72 + tid].x = SQRT128_INV * CMPLX_A_MUL_B_r(s_capbuf[tid + 92], coeff);
+        d_tfg[bid * 72 + tid].y = SQRT128_INV * CMPLX_A_MUL_B_i(s_capbuf[tid + 92], coeff);
     } else if (tid < 72) {
-        coeff.x =  cos(2 * CUDART_PI * late * (tid - 35) / 128);
-        coeff.y = -sin(2 * CUDART_PI * late * (tid - 35) / 128);
+        theta   = 2 * CUDART_PI * late * (tid - 35) / 128;
+        coeff.x =  cos(theta);
+        coeff.y = -sin(theta);
 
-        d_tfg[bid * 72 + tid].x = SQRT128_INV * COMPLEX_MUL_REAL(s_capbuf[tid - 35], coeff);
-        d_tfg[bid * 72 + tid].y = SQRT128_INV * COMPLEX_MUL_IMAG(s_capbuf[tid - 35], coeff);
+        d_tfg[bid * 72 + tid].x = SQRT128_INV * CMPLX_A_MUL_B_r(s_capbuf[tid - 35], coeff);
+        d_tfg[bid * 72 + tid].y = SQRT128_INV * CMPLX_A_MUL_B_i(s_capbuf[tid - 35], coeff);
     }
 }
 
@@ -2284,8 +2290,8 @@ __global__ void extract_tfg_singleblock_kernel(cuDoubleComplex *d_capbuf, cuDoub
         shift.x = cos(k * t);
         shift.y = sin(k * t);
 
-        s_capbuf[i].x = COMPLEX_MUL_REAL(d_capbuf[t], shift);
-        s_capbuf[i].y = COMPLEX_MUL_IMAG(d_capbuf[t], shift);
+        s_capbuf[i].x = CMPLX_A_MUL_B_r(d_capbuf[t], shift);
+        s_capbuf[i].y = CMPLX_A_MUL_B_i(d_capbuf[t], shift);
     }
 
     // DFT of 128 points
@@ -2305,16 +2311,17 @@ __global__ void extract_tfg_singleblock_kernel(cuDoubleComplex *d_capbuf, cuDoub
 
     for (unsigned int i = 1; i <= 36; i++) {
         cuDoubleComplex coeff;
-        coeff.x =  cos(2 * CUDART_PI * late * i / 128);
-        coeff.y = -sin(2 * CUDART_PI * late * i / 128);
+        double theta = 2 * CUDART_PI * late * i / 128;
+        coeff.x =  cos(theta);
+        coeff.y = -sin(theta);
 
-        d_tfg[tid * 72 + 35 + i].x = SQRT128_INV * COMPLEX_MUL_REAL(s_capbuf[i], coeff);
-        d_tfg[tid * 72 + 35 + i].y = SQRT128_INV * COMPLEX_MUL_IMAG(s_capbuf[i], coeff);
+        d_tfg[tid * 72 + 35 + i].x = SQRT128_INV * CMPLX_A_MUL_B_r(s_capbuf[i], coeff);
+        d_tfg[tid * 72 + 35 + i].y = SQRT128_INV * CMPLX_A_MUL_B_i(s_capbuf[i], coeff);
 
         coeff.y = -coeff.y;
 
-        d_tfg[tid * 72 + 36 - i].x = SQRT128_INV * COMPLEX_MUL_REAL(s_capbuf[128 - i], coeff);
-        d_tfg[tid * 72 + 36 - i].y = SQRT128_INV * COMPLEX_MUL_IMAG(s_capbuf[128 - i], coeff);
+        d_tfg[tid * 72 + 36 - i].x = SQRT128_INV * CMPLX_A_MUL_B_r(s_capbuf[128 - i], coeff);
+        d_tfg[tid * 72 + 36 - i].y = SQRT128_INV * CMPLX_A_MUL_B_i(s_capbuf[128 - i], coeff);
     }
 }
 
@@ -2377,8 +2384,8 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
 
             std_rs.y = -std_rs.y;
 
-            d_rs_extracted[((tid & 1) * 122 + (tid / 2)) * 12 + i].x = COMPLEX_MUL_REAL(rcvd_rs, std_rs);
-            d_rs_extracted[((tid & 1) * 122 + (tid / 2)) * 12 + i].y = COMPLEX_MUL_IMAG(rcvd_rs, std_rs);
+            d_rs_extracted[((tid & 1) * 122 + (tid / 2)) * 12 + i].x = CMPLX_A_MUL_B_r(rcvd_rs, std_rs);
+            d_rs_extracted[((tid & 1) * 122 + (tid / 2)) * 12 + i].y = CMPLX_A_MUL_B_i(rcvd_rs, std_rs);
         }
     }
 
@@ -2398,15 +2405,15 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
             rs_2 = d_rs_extracted[(0 + tid + 1) * 12 + i];
 
             rs_1.y = -rs_1.y;
-            real += COMPLEX_MUL_REAL(rs_1, rs_2);
-            imag += COMPLEX_MUL_IMAG(rs_1, rs_2);
+            real += CMPLX_A_MUL_B_r(rs_1, rs_2);
+            imag += CMPLX_A_MUL_B_i(rs_1, rs_2);
 
             rs_1 = d_rs_extracted[(122 + tid + 0) * 12 + i];
             rs_2 = d_rs_extracted[(122 + tid + 1) * 12 + i];
 
             rs_1.y = -rs_1.y;
-            real += COMPLEX_MUL_REAL(rs_1, rs_2);
-            imag += COMPLEX_MUL_IMAG(rs_1, rs_2);
+            real += CMPLX_A_MUL_B_r(rs_1, rs_2);
+            imag += CMPLX_A_MUL_B_i(rs_1, rs_2);
         }
 
         atomicAdd(&foe_real, real);
@@ -2430,21 +2437,26 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
 
         cuDoubleComplex coeff;
         double real, imag;
+        double theta;
 
-        coeff.x = cos(2 * CUDART_PI * ((-residual_f) * dft_location / (FS_LTE / 16) - (late * i / 128)));
-        coeff.y = sin(2 * CUDART_PI * ((-residual_f) * dft_location / (FS_LTE / 16) - (late * i / 128)));
+        theta = 2 * CUDART_PI * ((-residual_f) * dft_location / (FS_LTE / 16) - (late * i / 128));
 
-        real = COMPLEX_MUL_REAL(d_tfg[tid * 72 + 35 + i], coeff);
-        imag = COMPLEX_MUL_IMAG(d_tfg[tid * 72 + 35 + i], coeff);
+        coeff.x = cos(theta);
+        coeff.y = sin(theta);
+
+        real = CMPLX_A_MUL_B_r(d_tfg[tid * 72 + 35 + i], coeff);
+        imag = CMPLX_A_MUL_B_i(d_tfg[tid * 72 + 35 + i], coeff);
 
         d_tfg[tid * 72 + 35 + i].x = real;
         d_tfg[tid * 72 + 35 + i].y = imag;
 
-        coeff.x = cos(2 * CUDART_PI * ((-residual_f) * dft_location / (FS_LTE / 16) + (late * i / 128)));
-        coeff.y = sin(2 * CUDART_PI * ((-residual_f) * dft_location / (FS_LTE / 16) + (late * i / 128)));
+        theta = 2 * CUDART_PI * ((-residual_f) * dft_location / (FS_LTE / 16) + (late * i / 128));
 
-        real = COMPLEX_MUL_REAL(d_tfg[tid * 72 + 36 - i], coeff);
-        imag = COMPLEX_MUL_IMAG(d_tfg[tid * 72 + 36 - i], coeff);
+        coeff.x = cos(theta);
+        coeff.y = sin(theta);
+
+        real = CMPLX_A_MUL_B_r(d_tfg[tid * 72 + 36 - i], coeff);
+        imag = CMPLX_A_MUL_B_i(d_tfg[tid * 72 + 36 - i], coeff);
 
         d_tfg[tid * 72 + 36 - i].x = real;
         d_tfg[tid * 72 + 36 - i].y = imag;
@@ -2500,8 +2512,8 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
 
             std_rs.y = -std_rs.y;
 
-            r1v.x = COMPLEX_MUL_REAL(rcvd_rs, std_rs);
-            r1v.y = -COMPLEX_MUL_IMAG(rcvd_rs, std_rs); // this r1v is actually conj(r1v)
+            r1v.x =  CMPLX_A_MUL_B_r(rcvd_rs, std_rs);
+            r1v.y = -CMPLX_A_MUL_B_i(rcvd_rs, std_rs); // this r1v is actually conj(r1v)
 
             std_rs.x = SQRT2_INV * (1.0 - ((rs_bits2 & 1) * 2));
             std_rs.y = SQRT2_INV * (1.0 - ((rs_bits2 & 2)));
@@ -2510,21 +2522,21 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
 
             rcvd_rs = d_tfg[(slot2 * n_symb_dl + l2) * 72 + v_offset2];
 
-            r2v.x = COMPLEX_MUL_REAL(rcvd_rs, std_rs);
-            r2v.y = COMPLEX_MUL_IMAG(rcvd_rs, std_rs);
+            r2v.x = CMPLX_A_MUL_B_r(rcvd_rs, std_rs);
+            r2v.y = CMPLX_A_MUL_B_i(rcvd_rs, std_rs);
 
             // elem_mult(conj(r1v), r2v)
 
-            toe1.x += COMPLEX_MUL_REAL(r1v, r2v);
-            toe1.y += COMPLEX_MUL_IMAG(r1v, r2v);
+            toe1.x += CMPLX_A_MUL_B_r(r1v, r2v);
+            toe1.y += CMPLX_A_MUL_B_i(r1v, r2v);
 
             r1v.y = -r1v.y;
             r2v.y = -r2v.y;   // this r2v is actually conj(r2v)
 
             // elem_mult(conj(r2v(i-1)), r1v(i))
 
-            toe2.x += COMPLEX_MUL_REAL(r1v, r2v_prev);
-            toe2.y += COMPLEX_MUL_IMAG(r1v, r2v_prev);
+            toe2.x += CMPLX_A_MUL_B_r(r1v, r2v_prev);
+            toe2.y += CMPLX_A_MUL_B_i(r1v, r2v_prev);
 
             r2v_prev = r2v;
         }
@@ -2549,16 +2561,16 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
         coeff.x = cos(2 * CUDART_PI * delay * i / 128);
         coeff.y = sin(2 * CUDART_PI * delay * i / 128);
 
-        real = COMPLEX_MUL_REAL(d_tfg[tid * 72 + 35 + i], coeff);
-        imag = COMPLEX_MUL_IMAG(d_tfg[tid * 72 + 35 + i], coeff);
+        real = CMPLX_A_MUL_B_r(d_tfg[tid * 72 + 35 + i], coeff);
+        imag = CMPLX_A_MUL_B_i(d_tfg[tid * 72 + 35 + i], coeff);
 
         d_tfg[tid * 72 + 35 + i].x = real;
         d_tfg[tid * 72 + 35 + i].y = imag;
 
         coeff.y = -coeff.y;
 
-        real = COMPLEX_MUL_REAL(d_tfg[tid * 72 + 36 - i], coeff);
-        imag = COMPLEX_MUL_IMAG(d_tfg[tid * 72 + 36 - i], coeff);
+        real = CMPLX_A_MUL_B_r(d_tfg[tid * 72 + 36 - i], coeff);
+        imag = CMPLX_A_MUL_B_i(d_tfg[tid * 72 + 36 - i], coeff);
 
         d_tfg[tid * 72 + 36 - i].x = real;
         d_tfg[tid * 72 + 36 - i].y = imag;
@@ -2632,8 +2644,8 @@ __global__ void chan_est_kernel(cuDoubleComplex *d_tfg, int num_slot, int ant_po
             conj_std_rs.x = SQRT2_INV * (1.0 - ((rs_bits & 0x1) * 2));
             conj_std_rs.y = - SQRT2_INV * (1.0 - (rs_bits & 0x2));
 
-            rcvd_rs[copy_pos].x = COMPLEX_MUL_REAL(tfg_rs, conj_std_rs);
-            rcvd_rs[copy_pos].y = COMPLEX_MUL_IMAG(tfg_rs, conj_std_rs);
+            rcvd_rs[copy_pos].x = CMPLX_A_MUL_B_r(tfg_rs, conj_std_rs);
+            rcvd_rs[copy_pos].y = CMPLX_A_MUL_B_i(tfg_rs, conj_std_rs);
         } else {
             rcvd_rs[copy_pos].x = 0.0;
             rcvd_rs[copy_pos].y = 0.0;
@@ -2779,11 +2791,11 @@ __global__ void chan_est_four_port_step1_kernel(cuDoubleComplex *d_tfg, int num_
             tfg_rs.x = d_tfg[(copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12)].x;
             tfg_rs.y = d_tfg[(copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12)].y;
 
-            conj_std_rs.x = SQRT2_INV * (1.0 - ((rs_bits & 0x1) * 2));
+            conj_std_rs.x =   SQRT2_INV * (1.0 - ((rs_bits & 0x1) * 2));
             conj_std_rs.y = - SQRT2_INV * (1.0 - (rs_bits & 0x2));
 
-            rcvd_rs[copy_pos].x = COMPLEX_MUL_REAL(tfg_rs, conj_std_rs);
-            rcvd_rs[copy_pos].y = COMPLEX_MUL_IMAG(tfg_rs, conj_std_rs);
+            rcvd_rs[copy_pos].x = CMPLX_A_MUL_B_r(tfg_rs, conj_std_rs);
+            rcvd_rs[copy_pos].y = CMPLX_A_MUL_B_i(tfg_rs, conj_std_rs);
         } else {
             rcvd_rs[copy_pos].x = 0.0;
             rcvd_rs[copy_pos].y = 0.0;
@@ -2906,7 +2918,7 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
 
 
 /*
- *
+ * Implementation of ce_interp_hex(). Not finished yet !!
  */
 __global__ void chan_est_four_port_step3_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_ce_filt, int num_slot,
                                                 unsigned short n_id_cell, int n_symb_dl
@@ -3169,9 +3181,9 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
 
     cell_out.freq_fine = cell_out.freq + h_adjust_f;
 
-    extract_tfg_multiblocks_kernel<<<n_ofdm_sym, 128>>>(d_capbuf, &(d_lte_decode_aux_data->tfg[0]), &(d_lte_decode_aux_data->tfg_timestamp[0]), d_adjust_f,
+    extract_tfg_multiblocks_kernel<<<n_ofdm_sym, 128>>>(d_capbuf, &(d_lte_decode_aux_data->tfg[0]), &(d_lte_decode_aux_data->tfg_timestamp[0]),
                                                         n_id_cell, n_symb_dl, frame_start,
-                                                        fc_requested, fc_programmed, fs_programmed, cell_out.freq);
+                                                        fc_requested, fc_programmed, fs_programmed, cell_out.freq_fine);
     checkCudaErrors(cudaDeviceSynchronize());
 
     tfoec_kernel<<<1, n_ofdm_sym>>>(&(d_lte_decode_aux_data->tfg[0]), &(d_lte_decode_aux_data->ce_filt[0]), &(d_lte_decode_aux_data->tfg_timestamp[0]),
@@ -3188,7 +3200,7 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     chan_est_four_port_step1_kernel<<<122 * 6, 36>>>(&(d_lte_decode_aux_data->tfg[0]), 122, n_id_cell, n_symb_dl, 
                                                      &(d_lte_decode_aux_data->ce_filt[0]), &(d_lte_decode_aux_data->err_pwr_acc[0]));
 
-    chan_est_four_port_step2_kernel<<<4, 122 * 2, 2 * 122 * sizeof(double)>>>(&(d_lte_decode_aux_data->err_pwr_acc[0]), 122, &(d_lte_decode_aux_data->np[0]));
+    chan_est_four_port_step2_kernel<<<4, 122 * 2, 2 * 122 * sizeof(double)>>>(&(d_lte_decode_aux_data->err_pwr_acc[0]), 122, &(d_lte_decode_aux_data->np_v[0]));
     checkCudaErrors(cudaDeviceSynchronize());
 
     checkCudaErrors(cudaMemcpy(h_tfg, &(d_lte_decode_aux_data->tfg[0]), n_ofdm_sym * 12 * 6 * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
