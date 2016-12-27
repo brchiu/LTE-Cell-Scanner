@@ -129,10 +129,10 @@ typedef struct {
     double freq_fine;
     double freq_superfine;
 
-    // 
+    //
     double freq_adjust;    // freq_fine = freq + freq_adjust
     double freq_residual;  // freq_superfine = freq_fine + freq_residual
-    double delay_residual; // delay_residual returned in tfoe_kernel 
+    double delay_residual; // delay_residual returned in tfoe_kernel
 } LTE_CELL_INFO;
 
 
@@ -149,7 +149,7 @@ typedef struct {
     cuDoubleComplex  sss_h12_est[NUM_SYMB_OF_PSS_SSS * 2 * 2];
     double           log_lik[168 * 2 * 2];
 
-    /* used in pss_sss_foe() */ 
+    /* used in pss_sss_foe() */
     cuDoubleComplex  M[MAX_N_SSS];
 
     cuDoubleComplex  h_sm[MAX_N_PSS * NUM_SYMB_OF_PSS_SSS];
@@ -673,7 +673,7 @@ __global__ void peak_search_kernel(double *d_xc_incoherent_collapsed_pow, int *d
 
                 /* 9600 - 274 <= pos_ind - peak_ind + 9600 <= 9600 + 274 */
 
-                if (((9600 - 274) <= (pos_ind - peak_ind + 9600)) && 
+                if (((9600 - 274) <= (pos_ind - peak_ind + 9600)) &&
                     ((pos_ind - peak_ind + 9600) <= (9600 + 274))) {
 
                     if (peak_n_id_2 == pos_n_id_2) {
@@ -748,13 +748,13 @@ extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
                                                     f_search_set[foi], fc_requested, fc_programmed, fs_programmed);
             checkCudaErrors(cudaDeviceSynchronize());
 
-            xc_correlate_step2_kernel<<<600, 16>>>(&(d_lte_sample_aux_data->xc_sqr[0]), 
+            xc_correlate_step2_kernel<<<600, 16>>>(&(d_lte_sample_aux_data->xc_sqr[0]),
                                                    &(d_lte_sample_per_freq_aux_data[foi].xc_incoherent_single[t * 9600]), n_cap,
                                                    f_search_set[foi], fc_requested, fc_programmed, fs_programmed);
             checkCudaErrors(cudaDeviceSynchronize());
 
 
-            xc_correlate_step3_kernel<<<600, 16>>>(&(d_lte_sample_per_freq_aux_data[foi].xc_incoherent_single[t * 9600]), 
+            xc_correlate_step3_kernel<<<600, 16>>>(&(d_lte_sample_per_freq_aux_data[foi].xc_incoherent_single[t * 9600]),
                                                    &(d_lte_sample_per_freq_aux_data[foi].xc_incoherent[t * 9600]),
                                                    ds_comb_arm);
             checkCudaErrors(cudaDeviceSynchronize());
@@ -762,7 +762,7 @@ extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
     }
     checkCudaErrors(cudaDeviceSynchronize());
 
-    xc_incoherent_collapsed_kernel<<<9600, 3>>>(d_lte_sample_per_freq_aux_data, 
+    xc_incoherent_collapsed_kernel<<<9600, 3>>>(d_lte_sample_per_freq_aux_data,
                                                 &(d_lte_sample_aux_data->xc_incoherent_collapsed_pow[0]), &(d_lte_sample_aux_data->xc_incoherent_collapsed_frq[0]), n_f);
     checkCudaErrors(cudaDeviceSynchronize());
 
@@ -772,11 +772,11 @@ extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
     double rx_cutoff = (6 * 12 * 15e3 / 2 + 4*15e3) / (FS_LTE / 16 / 2);
     double Z_th1_factor = R_th1 / rx_cutoff / 137 / 2 / n_comb_xc / (2 * ds_comb_arm + 1);
 
-    sp_incoherent_kernel<<<600, 512>>>(&(d_lte_sample_capture->capbuf[0]), 
+    sp_incoherent_kernel<<<600, 512>>>(&(d_lte_sample_capture->capbuf[0]),
                                        &(d_lte_sample_aux_data->sp_incoherent[0]), &(d_lte_sample_aux_data->Z_th1[0]), n_cap, Z_th1_factor);
     checkCudaErrors(cudaDeviceSynchronize());
 
-    peak_search_kernel<<<1, 1024>>>(&(d_lte_sample_aux_data->xc_incoherent_collapsed_pow[0]), &(d_lte_sample_aux_data->xc_incoherent_collapsed_frq[0]), 
+    peak_search_kernel<<<1, 1024>>>(&(d_lte_sample_aux_data->xc_incoherent_collapsed_pow[0]), &(d_lte_sample_aux_data->xc_incoherent_collapsed_frq[0]),
                                     d_f_search_set,
                                     &(d_lte_sample_aux_data->Z_th1[0]), d_lte_sample_per_freq_aux_data, &(d_lte_sample_aux_data->aux[0]), ds_comb_arm,
                                     d_lte_cell_info);
@@ -957,9 +957,9 @@ __global__ void sss_detect_getce_sss_multiblocks_step1_kernel(cuDoubleComplex *d
 
     if (tid < 31) {
         d_sss_nrm_raw[output_offset + tid].x = SQRT128_INV * s_nrm_sss_dft[tid + 97].x;
-        d_sss_nrm_raw[output_offset + tid].y = SQRT128_INV * s_nrm_sss_dft[tid + 97].y; 
+        d_sss_nrm_raw[output_offset + tid].y = SQRT128_INV * s_nrm_sss_dft[tid + 97].y;
         d_sss_ext_raw[output_offset + tid].x = SQRT128_INV * s_ext_sss_dft[tid + 97].x;
-        d_sss_ext_raw[output_offset + tid].y = SQRT128_INV * s_ext_sss_dft[tid + 97].y; 
+        d_sss_ext_raw[output_offset + tid].y = SQRT128_INV * s_ext_sss_dft[tid + 97].y;
     } else if (tid < 62) {
         d_sss_nrm_raw[output_offset + tid].x = SQRT128_INV * s_nrm_sss_dft[tid - 30].x;
         d_sss_nrm_raw[output_offset + tid].y = SQRT128_INV * s_nrm_sss_dft[tid - 30].y;
@@ -1016,7 +1016,7 @@ __global__ void sss_detect_getce_sss_multiblocks_step2_kernel(int n_pss,
     //  for (uint8 t = 0; t < 62; t++) {
     //
     //      // First half (h1) and second half (h2) channel estimates.
-    // 
+    //
     //      cvec h_sm_h1 = h_sm.get_col(t).get(itpp_ext::matlab_range(0, 2, n_pss - 1));
     //      cvec h_sm_h2 = h_sm.get_col(t).get(itpp_ext::matlab_range(1, 2, n_pss - 1));
     //
@@ -1073,12 +1073,12 @@ __global__ void sss_detect_getce_sss_multiblocks_step2_kernel(int n_pss,
     atomicAdd(&sss_h12_ext_est_real[tid & 1], (float)ext_real);
     atomicAdd(&sss_h12_ext_est_imag[tid & 1], (float)ext_imag);
 
-    __syncthreads(); 
+    __syncthreads();
 
     if (tid < 2) {
         d_sss_h12_nrm_est[bid + tid * 62].x = sss_h12_nrm_est_real[tid];
         d_sss_h12_nrm_est[bid + tid * 62].y = sss_h12_nrm_est_imag[tid];
- 
+
         d_sss_h12_ext_est[bid + tid * 62].x = sss_h12_ext_est_real[tid];
         d_sss_h12_ext_est[bid + tid * 62].y = sss_h12_ext_est_imag[tid];
     }
@@ -1213,7 +1213,7 @@ __global__ void sss_detect_getce_sss_singleblock_kernel(cuDoubleComplex *d_capbu
     //  for (uint8 t = 0; t < 62; t++) {
     //
     //      // First half (h1) and second half (h2) channel estimates.
-    // 
+    //
     //      cvec h_sm_h1 = h_sm.get_col(t).get(itpp_ext::matlab_range(0, 2, n_pss - 1));
     //      cvec h_sm_h2 = h_sm.get_col(t).get(itpp_ext::matlab_range(1, 2, n_pss - 1));
     //
@@ -1374,7 +1374,7 @@ __device__ void sss_detect_ml_helper_function(float *sss_np_est, cuDoubleComplex
     /* elem_mult(conj(sss_h12_est), sss_h12_try) */
     buffer1[tid].x =   sss_est[tid].x * sss_try_orig[tid];
     buffer1[tid].y = - sss_est[tid].y * sss_try_orig[tid];
-    
+
     __syncthreads();
 
     for (int s = 128 / 2; s > 0; s >>= 1) {
@@ -1448,7 +1448,7 @@ __global__ void sss_detect_ml_kernel(float *d_sss_h12_np_est, cuDoubleComplex *d
 
         sss_h12_est = (bid_mod4 / 2) ? sss_h12_ext_est : sss_h12_nrm_est;
         sss_try = (bid_mod4 & 1) ? sss_h21_try : sss_h12_try;
-        d_log_lik = (bid_mod4 / 2) ? &d_log_lik_ext[(bid_mod4 & 1) * 168 + bid_div4] : &d_log_lik_nrm[(bid_mod4 & 1) * 168 + bid_div4]; 
+        d_log_lik = (bid_mod4 / 2) ? &d_log_lik_ext[(bid_mod4 & 1) * 168 + bid_div4] : &d_log_lik_nrm[(bid_mod4 & 1) * 168 + bid_div4];
     }
 
     __syncthreads();
@@ -1556,14 +1556,14 @@ __global__ void sss_detect_ml_decision_kernel(double *d_log_lik, int thresh2_n_s
 {
     __shared__ double log_lik_max[4], log_lik_mean, log_lik_var;
     __shared__ int log_lik_idx[4];
- 
+
     const unsigned int tid = threadIdx.x;
 
     log_lik_maximum(&d_log_lik[0], &log_lik_max[0], &log_lik_idx[0]);
     __syncthreads();
 
     log_lik_mean_var(&d_log_lik[0], &log_lik_mean, &log_lik_var);
-    __syncthreads(); 
+    __syncthreads();
 
     if (tid == 0) {
         double max_value = log_lik_max[0];
@@ -1617,7 +1617,7 @@ __global__ void pss_sss_foe_multiblocks_step1_kernel(cuDoubleComplex *d_capbuf, 
     cuDoubleComplex shift, acc, *p_pss_fd;
     unsigned int sss_fd_bit;
     const double k_factor = (fc_requested - freq) / fc_programmed;
-    unsigned int *p_sss_fd;     
+    unsigned int *p_sss_fd;
     const int n_id_1 = n_id_cell / 3, n_id_2 = n_id_cell % 3;
     double real, imag;
 
@@ -1667,7 +1667,7 @@ __global__ void pss_sss_foe_multiblocks_step1_kernel(cuDoubleComplex *d_capbuf, 
     } else if (tid == 64) {
         kernel_fft_radix2(s_sss_dft, 128);
     }
-    
+
     __syncthreads();
 
     // h_raw_fo_pss : concat(dft_out.right(31), dft_out.mid(1,31)) .* conj(pss_fd)
@@ -1753,7 +1753,7 @@ __global__ void pss_sss_foe_multiblocks_step1_kernel(cuDoubleComplex *d_capbuf, 
             sss_raw_fo[tid].x = - sss_raw_fo[tid].x;
         else
             sss_raw_fo[tid].y = - sss_raw_fo[tid].y;
- 
+
         // elem_mult(conj(sss_raw_fo), h_raw_fo_pss, to_cvec(elem_mult(sqr(h_sm), 1.0/(2*sqr(h_sm)*pss_np+sqr(pss_np))
 
         double sqr_sm = CMPLX_SQR(acc);
@@ -1807,7 +1807,7 @@ __global__ void pss_sss_foe_multiblocks_step2_kernel(cuDoubleComplex *d_M, int n
         }
         __syncthreads();
     }
-    
+
 
     if (tid == 0) {
         *d_adjust_f = angle((float)s_M[0].x, (float)s_M[0].y) / (2 * CUDART_PI) / (1 / (fs_programmed * k_factor) * pss_sss_dist);
@@ -3099,7 +3099,7 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     /* prologue of function sss_detect() of searcher.cpp */
 
     const double peak_freq = cell_out.freq;
-    double k_factor = (fc_requested - peak_freq) / fc_programmed; 
+    double k_factor = (fc_requested - peak_freq) / fc_programmed;
     double peak_loc = (cell.ind + 9 < 162 ? cell_out.ind + 9600 * k_factor : cell_out.ind);
     const unsigned int n_id_2_est = cell_out.n_id_2;
     const int n_pss = ceil((n_cap - 125 - 9 - peak_loc) / (k_factor * 9600));
@@ -3109,17 +3109,17 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
 
     checkCudaErrors(cudaMalloc(&d_lte_decode_aux_data, sizeof(LTE_DECODE_AUX_DATA)));
     h_lte_decode_aux_data = (LTE_DECODE_AUX_DATA *)malloc(sizeof(LTE_DECODE_AUX_DATA));
-    
+
     sss_detect_getce_sss_multiblocks_step1_kernel<<<n_pss, 128>>>(d_capbuf, n_pss,
                                                                   n_id_2_est, peak_loc,
                                                                   fc_requested, fc_programmed, fs_programmed, peak_freq,
                                                                   // output
-                                                                  &(d_lte_decode_aux_data->h_sm[0]), &(d_lte_decode_aux_data->pss_np_inv[0]), 
+                                                                  &(d_lte_decode_aux_data->h_sm[0]), &(d_lte_decode_aux_data->pss_np_inv[0]),
                                                                   &(d_lte_decode_aux_data->sss_raw[0]), &(d_lte_decode_aux_data->sss_raw[n_pss * 62]));
     checkCudaErrors(cudaDeviceSynchronize());
 
     sss_detect_getce_sss_multiblocks_step2_kernel<<<62, n_pss>>>(n_pss,
-                                                                 &(d_lte_decode_aux_data->h_sm[0]), &(d_lte_decode_aux_data->pss_np_inv[0]), 
+                                                                 &(d_lte_decode_aux_data->h_sm[0]), &(d_lte_decode_aux_data->pss_np_inv[0]),
                                                                  &(d_lte_decode_aux_data->sss_raw[0]), &(d_lte_decode_aux_data->sss_raw[n_pss * 62]),
                                                                  // output
                                                                  &(d_lte_decode_aux_data->sss_h12_np_est[0]),
@@ -3196,7 +3196,7 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
 
     cell_out.freq_superfine = cell_out.freq_fine + h_residual_f;
 
-    chan_est_four_port_step1_kernel<<<122 * 6, 36>>>(&(d_lte_decode_aux_data->tfg[0]), 122, n_id_cell, n_symb_dl, 
+    chan_est_four_port_step1_kernel<<<122 * 6, 36>>>(&(d_lte_decode_aux_data->tfg[0]), 122, n_id_cell, n_symb_dl,
                                                      &(d_lte_decode_aux_data->ce_filt[0]), &(d_lte_decode_aux_data->err_pwr_acc[0]));
 
     chan_est_four_port_step2_kernel<<<4, 122 * 2, 2 * 122 * sizeof(double)>>>(&(d_lte_decode_aux_data->err_pwr_acc[0]), 122, &(d_lte_decode_aux_data->np_v[0]));
