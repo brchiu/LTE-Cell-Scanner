@@ -1590,6 +1590,7 @@ __global__ void sss_detect_ml_decision_kernel(double *d_log_lik, int thresh2_n_s
 
 #undef WRAP
 #define WRAP(x,sm,lg) (fmod((x)-(sm),(lg)-(sm))+(sm))
+        if (frame_start < 0) frame_start += ((2 * 9600.0 - 0.5) * 16 / FS_LTE * fs_programmed * k_factor + 0.5);
         frame_start = WRAP(frame_start, -0.5, (2*9600.0-0.5)*16/FS_LTE*fs_programmed*k_factor);
 
         if (max_value < log_lik_mean + sqrt(log_lik_var) * thresh2_n_sigma)
