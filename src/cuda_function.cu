@@ -542,13 +542,18 @@ __global__ void sp_incoherent_kernel(cuDoubleComplex *d_capbuf, double *d_sp_inc
 /*
  *
  */
-__global__ void peak_search_kernel(double *d_xc_incoherent_collapsed_pow, int *d_xc_incoherent_collapsed_frq, double *d_f_search_set,
-                                   double *d_Z_th1, LTE_SAMPLE_PER_FREQ_AUX_DATA *d_lte_sample_per_freq_aux_data,
-                                   short *d_aux, int ds_comb_arm, LTE_CELL_INFO *d_lte_cell_info)
+__global__ void peak_search_kernel(LTE_SAMPLE_AUX_DATA *d_lte_sample_aux_data, double *d_f_search_set,
+                                   LTE_SAMPLE_PER_FREQ_AUX_DATA *d_lte_sample_per_freq_aux_data,
+                                   int ds_comb_arm, LTE_CELL_INFO *d_lte_cell_info)
 {
     __shared__ unsigned int finished;
     __shared__ double thresh1, thresh2, peak_pow;
     __shared__ short peak_pos, peak_ind, peak_n_id_2;
+
+    double *d_xc_incoherent_collapsed_pow = (double *)&(d_lte_sample_aux_data->xc_incoherent_collapsed_pow[0]);
+    int    *d_xc_incoherent_collapsed_frq = (int *)&(d_lte_sample_aux_data->xc_incoherent_collapsed_frq[0]);
+    double *d_Z_th1 = (double *)&(d_lte_sample_aux_data->Z_th1[0]);
+    short  *d_aux   = (short *)&(d_lte_sample_aux_data->aux[0]);
 
     const int tid = threadIdx.x;
     short pos, pos_ind, pos_n_id_2;
@@ -560,15 +565,15 @@ __global__ void peak_search_kernel(double *d_xc_incoherent_collapsed_pow, int *d
         }
     }
 
-    for (unsigned int i = tid; i < 9600 * 3; i += 1024) {
+    for (unsigned int i = tid; i < 9600 * 3; i += 128) {
         d_aux[i] = i;
     }
 
     __syncthreads();
 
     do {
-        for (unsigned int k = 0; k < 9600 * 3; k += 2048) {
-            for (unsigned int s = 1024; s > 0; s >>= 1) {
+        for (unsigned int k = 0; k < 9600 * 3; k += 256) {
+            for (unsigned int s = 128; s > 0; s >>= 1) {
                 if ((tid < s) && (k + tid + s < 9600 * 3)) {
                     int pos1 = d_aux[k + tid];
                     int pos2 = d_aux[k + tid + s];
@@ -582,14 +587,14 @@ __global__ void peak_search_kernel(double *d_xc_incoherent_collapsed_pow, int *d
             __syncthreads();
         }
 
-        for (unsigned int s = 8; s > 0; s >>= 1) {
-            if ((tid < s) && ((tid + s) * 2048 < 9600 * 3)) {
-                int pos1 = d_aux[tid * 2048];
-                int pos2 = d_aux[(tid + s) * 2048];
+        for (unsigned int s = 64; s > 0; s >>= 1) {
+            if ((tid < s) && ((tid + s) * 256 < 9600 * 3)) {
+                int pos1 = d_aux[tid * 256];
+                int pos2 = d_aux[(tid + s) * 256];
 
                 if (d_xc_incoherent_collapsed_pow[pos1] < d_xc_incoherent_collapsed_pow[pos2]) {
-                    d_aux[tid * 2048] = pos2;
-                    d_aux[(tid + s) * 2048] = pos1;
+                    d_aux[tid * 256] = pos2;
+                    d_aux[(tid + s) * 256] = pos1;
                 }
             }
             __syncthreads();
@@ -659,7 +664,7 @@ __global__ void peak_search_kernel(double *d_xc_incoherent_collapsed_pow, int *d
 
         if (!finished) {
 
-            for (unsigned int i = tid; i < 3 * 9600; i += 1024) {
+            for (unsigned int i = tid; i < 3 * 9600; i += 128) {
 
                 pos = d_aux[i];
 
@@ -719,7 +724,7 @@ extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
 
     h_lte_sample_capture = (LTE_SAMPLE_CAPTURE *)malloc(sizeof(LTE_SAMPLE_CAPTURE));
     h_f_search_set = (double *)malloc(n_f * sizeof(double));
-    h_lte_cell_info = (LTE_CELL_INFO *)malloc(MAX_CELL_PER_FREQ * sizeof(LTE_CELL_INFO));
+    h_lte_cell_info = (LTE_CELL_INFO *)calloc(1, MAX_CELL_PER_FREQ * sizeof(LTE_CELL_INFO));
 
     checkCudaErrors(cudaMalloc(&d_lte_sample_capture, sizeof(LTE_SAMPLE_CAPTURE)));
     checkCudaErrors(cudaMalloc(&d_lte_sample_aux_data, sizeof(LTE_SAMPLE_AUX_DATA)));
@@ -739,6 +744,8 @@ extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
     }
 
     checkCudaErrors(cudaMemcpy(d_f_search_set, h_f_search_set, n_f * sizeof(double), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(d_lte_cell_info, h_lte_cell_info, MAX_CELL_PER_FREQ * sizeof(LTE_CELL_INFO), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaDeviceSynchronize());
 
     /* xc_correlate, xc_combine, xc_delay_spread */
     for (unsigned int foi = 0; foi < n_f; foi++) {
@@ -776,13 +783,11 @@ extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
                                        &(d_lte_sample_aux_data->sp_incoherent[0]), &(d_lte_sample_aux_data->Z_th1[0]), n_cap, Z_th1_factor);
     checkCudaErrors(cudaDeviceSynchronize());
 
-    peak_search_kernel<<<1, 1024>>>(&(d_lte_sample_aux_data->xc_incoherent_collapsed_pow[0]), &(d_lte_sample_aux_data->xc_incoherent_collapsed_frq[0]),
-                                    d_f_search_set,
-                                    &(d_lte_sample_aux_data->Z_th1[0]), d_lte_sample_per_freq_aux_data, &(d_lte_sample_aux_data->aux[0]), ds_comb_arm,
-                                    d_lte_cell_info);
+    peak_search_kernel<<<1, 128>>>(d_lte_sample_aux_data, d_f_search_set, d_lte_sample_per_freq_aux_data, ds_comb_arm, d_lte_cell_info);
     checkCudaErrors(cudaDeviceSynchronize());
 
     checkCudaErrors(cudaMemcpy(h_lte_cell_info, d_lte_cell_info, MAX_CELL_PER_FREQ * sizeof(LTE_CELL_INFO), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaDeviceSynchronize());
 
     printf("----------------------------------------------\n");
     for (unsigned int i = 0; i < MAX_CELL_PER_FREQ; i++) {
