@@ -3100,6 +3100,7 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
 
     checkCudaErrors(cudaMalloc(&d_capbuf, n_cap * sizeof(cuDoubleComplex)));
     checkCudaErrors(cudaMemcpy(d_capbuf, h_capbuf, n_cap * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaDeviceSynchronize());
 
     /* prologue of function sss_detect() of searcher.cpp */
 
@@ -3145,6 +3146,7 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     checkCudaErrors(cudaMemcpy(&h_cp_type, d_cp_type, sizeof(int), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(&h_n_id_1_est, d_n_id_1_est, sizeof(int), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(&h_frame_start, d_frame_start, sizeof(double), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaDeviceSynchronize());
 
     cell_out.frame_start = h_frame_start;
     cell_out.n_id_1 = h_n_id_1_est;
@@ -3182,6 +3184,7 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     checkCudaErrors(cudaDeviceSynchronize());
 
     checkCudaErrors(cudaMemcpy(&h_adjust_f, d_adjust_f, sizeof(double), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaDeviceSynchronize());
 
     cell_out.freq_fine = cell_out.freq + h_adjust_f;
 
@@ -3198,6 +3201,7 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     checkCudaErrors(cudaDeviceSynchronize());
 
     checkCudaErrors(cudaMemcpy(&h_residual_f, d_residual_f, sizeof(double), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaDeviceSynchronize());
 
     cell_out.freq_superfine = cell_out.freq_fine + h_residual_f;
 
