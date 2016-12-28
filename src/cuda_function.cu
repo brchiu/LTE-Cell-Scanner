@@ -2891,7 +2891,7 @@ __global__ void chan_est_four_port_step2_kernel(double *d_err_pwr_acc, int num_s
                                                 // output
                                                 double *d_np)
 {
-    extern __shared__ double err_pwr_acc[];
+    __shared__ double err_pwr_acc[2 * 122];
 
     const unsigned int bid = blockIdx.x;
     const unsigned int tid = threadIdx.x;
@@ -3152,6 +3152,20 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     cell_out.n_id_1 = h_n_id_1_est;
     cell_out.cp_type = (cp_type_t::cp_type_t)h_cp_type;
 
+    if (h_n_id_1_est == -1) {
+        free(h_capbuf);
+        free(h_lte_decode_aux_data);
+
+        checkCudaErrors(cudaFree(d_lte_decode_aux_data));
+        checkCudaErrors(cudaFree(d_capbuf));
+        checkCudaErrors(cudaFree(d_adjust_f));
+        checkCudaErrors(cudaFree(d_residual_f));
+        checkCudaErrors(cudaFree(d_frame_start));
+        checkCudaErrors(cudaFree(d_n_id_1_est));
+        checkCudaErrors(cudaFree(d_cp_type));
+        return cell_out;
+    }
+
     const int n_symb_dl = (h_cp_type == (int)cp_type_t::NORMAL ? 7 : 6);
     const int n_ofdm_sym = (6*10*2+2)*n_symb_dl;
     const double frame_start = h_frame_start;
@@ -3208,7 +3222,7 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     chan_est_four_port_step1_kernel<<<122 * 6, 36>>>(&(d_lte_decode_aux_data->tfg[0]), 122, n_id_cell, n_symb_dl,
                                                      &(d_lte_decode_aux_data->ce_filt[0]), &(d_lte_decode_aux_data->err_pwr_acc[0]));
 
-    chan_est_four_port_step2_kernel<<<4, 122 * 2, 2 * 122 * sizeof(double)>>>(&(d_lte_decode_aux_data->err_pwr_acc[0]), 122, &(d_lte_decode_aux_data->np_v[0]));
+    chan_est_four_port_step2_kernel<<<4, 122 * 2>>>(&(d_lte_decode_aux_data->err_pwr_acc[0]), 122, &(d_lte_decode_aux_data->np_v[0]));
     checkCudaErrors(cudaDeviceSynchronize());
 
     checkCudaErrors(cudaMemcpy(&(h_lte_decode_aux_data->tfg[0]), &(d_lte_decode_aux_data->tfg[0]), n_ofdm_sym * 12 * 6 * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));

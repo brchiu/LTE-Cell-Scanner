@@ -475,9 +475,11 @@ int main(
   if (!use_recorded_data)
     config_usb(correction,device_index,freq_start,dev,fs_programmed);
 
-  cuda_reset_device();
-  cuda_generate_fft_aux_data(128);
-  cuda_copy_constant_data_to_device();
+  if (use_cuda) {
+      cuda_reset_device();
+      cuda_generate_fft_aux_data(128);
+      cuda_copy_constant_data_to_device();
+  }
 
   // Generate a list of center frequencies that should be searched and also
   // a list of frequency offsets that should be searched for each center
@@ -546,15 +548,23 @@ int main(
       //cout << "Further examining: " << endl;
       //cout << (*iterator) << endl << endl;
 
-      if (0) {
+      if (use_cuda) {
         cmat tfg_comp;
-        Cell cell_out = cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est((*iterator), capbuf, fc_requested, fc_programmed, fs_programmed, tfg_comp);
+        (*iterator) = cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est((*iterator), capbuf, fc_requested, fc_programmed, fs_programmed, tfg_comp);
+
+        if ((*iterator).n_id_1 == -1) {
+          iterator = detected_cells[fci].erase(iterator);
+          continue;
+        }
+
+        // Create object containing all RS
+        RS_DL rs_dl((*iterator).n_id_cell(), 6, (*iterator).cp_type);
+
+        // Finally, attempt to decode the MIB
+        (*iterator) = decode_mib((*iterator), tfg_comp, rs_dl);
 
         // (*iterator) = decode_mib_lower_half((*iterator), tfg_comp);
       } else {
-        cmat tfg_comp2;
-        Cell cell_out = cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est((*iterator), capbuf, fc_requested, fc_programmed, fs_programmed, tfg_comp2);
-
         // Detect SSS if possible
         vec sss_h1_np_est_meas;
         vec sss_h2_np_est_meas;
@@ -589,7 +599,7 @@ int main(
         (*iterator)=tfoec((*iterator),tfg,tfg_timestamp,fc_requested,fc_programmed,rs_dl,tfg_comp,tfg_comp_timestamp);
 
         // Finally, attempt to decode the MIB
-        (*iterator)=decode_mib((*iterator),tfg_comp2,rs_dl);
+        (*iterator)=decode_mib((*iterator),tfg_comp,rs_dl);
       }
       if ((*iterator).n_rb_dl==-1) {
         // No MIB could be successfully decoded.
