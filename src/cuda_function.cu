@@ -3334,7 +3334,7 @@ __global__ void print_kernel_complex(cuDoubleComplex *d_data, int len)
     printf("\n\n");
 }
 
-
+extern void ce_interp_hex(const cmat & ce_filt, const ivec & shift, const int16 & n_ofdm, const int16 & n_rs_ofdm, const ivec & rs_set, cmat & ce_tfg);
 
 /*
  *
@@ -3496,11 +3496,13 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
 
     chan_est_four_port_step1_kernel<<<122 * 6, 36>>>(&(d_lte_decode_aux_data->tfg[0]), 122, n_id_cell, n_symb_dl,
                                                      &(d_lte_decode_aux_data->ce_filt[0]), &(d_lte_decode_aux_data->err_pwr_acc[0]));
+    checkCudaErrors(cudaDeviceSynchronize());
 
     chan_est_four_port_step2_kernel<<<4, 122 * 2>>>(&(d_lte_decode_aux_data->err_pwr_acc[0]), 122, &(d_lte_decode_aux_data->np_v[0]));
     checkCudaErrors(cudaDeviceSynchronize());
 
-    checkCudaErrors(cudaMemcpy(&(h_lte_decode_aux_data->tfg[0]), &(d_lte_decode_aux_data->tfg[0]), n_ofdm_sym * 12 * 6 * sizeof(cuDoubleComplex), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(&(h_lte_decode_aux_data->tfg[0]), &(d_lte_decode_aux_data->tfg[0]), sizeof(d_lte_decode_aux_data->tfg), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaMemcpy(&(h_lte_decode_aux_data->ce_filt[0]), &(d_lte_decode_aux_data->ce_filt[0]), sizeof(d_lte_decode_aux_data->ce_filt), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaDeviceSynchronize());
 
     my_tfg_comp = cmat(n_ofdm_sym, 72);
@@ -3510,6 +3512,50 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
             my_tfg_comp(i,j).imag() = h_lte_decode_aux_data->tfg[i * 72 + j].y;
         }
     }
+
+    for (int i = 0; i < 4; i++) {
+
+        int n_rs_ofdm = (i < 2) ? NUM_SLOT_TO_SEARCH * 2 : NUM_SLOT_TO_SEARCH;
+        int n_rs_ofdm_start = (i < 2) ? (NUM_SLOT_TO_SEARCH * 2 * i) : NUM_SLOT_TO_SEARCH * (4 + (i - 2));
+        cmat ce_tfg, ce_filt(n_rs_ofdm, 12);
+        ivec rs_set = ivec(n_rs_ofdm);
+        ivec shift(2);
+
+        if (i < 2) {
+            for (int l = 0; l < NUM_SLOT_TO_SEARCH; l++) {
+                rs_set(l * 2 + 0) = l * n_symb_dl;
+                rs_set(l * 2 + 1) = l * n_symb_dl + n_symb_dl - 3;
+            }
+            shift[0] = ((i * 3) + (n_id_cell % 6)) % 6;
+            shift[1] = (((1 - i) * 3) + (n_id_cell % 6)) % 6;
+        } else {
+            for (int l = 0; l < NUM_SLOT_TO_SEARCH; l++) {
+                rs_set(l) = l * n_symb_dl + 1;
+            }
+            shift[0] = (((i - 2) * 3) + (n_id_cell % 6)) % 6;
+            shift[1] = (((3 - i) * 3) + (n_id_cell % 6)) % 6;
+        }
+
+        for (int l = 0; l < n_rs_ofdm; l++) {
+            for (int k = 0; k < 12; k++) {
+                ce_filt(l,k).real() = h_lte_decode_aux_data->ce_filt[(n_rs_ofdm_start + l) * 12 + k].x;
+                ce_filt(l,k).imag() = h_lte_decode_aux_data->ce_filt[(n_rs_ofdm_start + l) * 12 + k].y;
+            }
+        }
+
+        ce_interp_hex(ce_filt, shift, NUM_OFDM_SYMB_TO_SEARCH, n_rs_ofdm, rs_set, ce_tfg);
+
+        for (int l = 0; l < n_ofdm_sym; l++) {
+            for (int k = 0; k < 72; k++) {
+                h_lte_decode_aux_data->ce_tfg[(i * NUM_OFDM_SYMB_TO_SEARCH + l) * 72 + k].x = ce_tfg(l,k).real();
+                h_lte_decode_aux_data->ce_tfg[(i * NUM_OFDM_SYMB_TO_SEARCH + l) * 72 + k].y = ce_tfg(l,k).imag();
+            }
+        }
+    }
+
+    /* Undo time-space diversity, demodulating and un-scrambling */
+    checkCudaErrors(cudaMemcpy(&(d_lte_decode_aux_data->ce_tfg[0]), &(h_lte_decode_aux_data->ce_tfg[0]), NUM_OFDM_SYMB_TO_SEARCH * 12 * 6 * 4 * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaDeviceSynchronize());
 
     decode_mib_lower_half_step1_kernel<<<dim3(4, 3, 16), 18>>>(d_lte_decode_aux_data, n_symb_dl, n_id_cell);
     checkCudaErrors(cudaDeviceSynchronize());
