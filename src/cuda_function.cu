@@ -53,6 +53,7 @@ using namespace itpp;
 #define CMPLX_A_MUL_CONJ_B_r(a, b)  ((a).x * (b).x + (a).y * (b).y)
 #define CMPLX_A_MUL_CONJ_B_i(a, b)  ((a).y * (b).x - (a).x * (b).y)
 #define CMPLX_SQR(a)                ((a).x * (a).x + (a).y * (a).y)
+#define SUM_SQR(x, y)               ((x)*(x)+(y)*(y))
 
 #undef SWAP
 #define SWAP(x,y)                   do { typeof (x) __tmp = (x); (x) = (y); (y) = (__tmp); } while (0)
@@ -163,6 +164,17 @@ typedef struct {
     cuDoubleComplex  ce_filt[NUM_SLOT_TO_SEARCH * 12 * 6]; // for 4 antenna port case : there are 2+2+1+1 reference symbols in one slot
     double           err_pwr_acc[NUM_SLOT_TO_SEARCH * 6];
     double           np_v[4];
+
+    cuDoubleComplex  ce_tfg[NUM_OFDM_SYMB_TO_SEARCH * 12 * 6 * 4]; /* ce_filt[] interpolation mesh */
+
+    /* used in decode_mib() */
+
+    cuDoubleComplex  pbch_sym[4 * 3 * 960];
+    double           np[4 * 3 * 960];
+    double           soft_bits[4 * 3 * 1920];
+
+    double           subblocks[4 * 3 * 3 * 40];
+
 } LTE_DECODE_AUX_DATA;
 
 
@@ -3033,6 +3045,267 @@ __global__ void chan_est_four_port_step3_kernel(cuDoubleComplex *d_tfg, cuDouble
 
 
 /*
+ *
+ */
+__global__ void decode_mib_lower_half_step1_kernel(LTE_DECODE_AUX_DATA *d_lte_decode_aux_data, int n_symb_dl, int n_id_cell)
+{
+    __shared__ unsigned int scr[5];
+
+    const unsigned int frame_timing_guess = blockIdx.x; /* frame_timing_guess : 0..3                  */
+    const unsigned int antt = blockIdx.y;               /* number of antenna : 0 -> 1, 1 -> 2, 2 -> 4 */
+    const unsigned int l_of_pbch = blockIdx.z;          /* the l-th symbol location of PBCH : 0..15   */
+    const unsigned int tid = threadIdx.x;
+    const unsigned int v_shift_m3 = n_id_cell - ((n_id_cell / 3) * 3);
+    cuDoubleComplex quad_ce[4][4], quad_sym[4], h1, h2;
+    double np, np_temp, inv_scale, xx, yy, metric[4];
+    int pos;
+
+    cuDoubleComplex *d_tfg       = (cuDoubleComplex *) &(d_lte_decode_aux_data->tfg[0]);
+    cuDoubleComplex *d_ce_tfg    = (cuDoubleComplex *) &(d_lte_decode_aux_data->ce_tfg[0]);
+    double          *d_np_v      = (double *) &(d_lte_decode_aux_data->np_v[0]);
+    double          *d_soft_bits = (double *) &(d_lte_decode_aux_data->soft_bits[0]);
+    cuDoubleComplex *d_pbch_sym  = (cuDoubleComplex *) &(d_lte_decode_aux_data->pbch_sym[0]);
+    double          *d_np        = (double *) &(d_lte_decode_aux_data->np[0]);
+
+    /* 20 * (0..3) * n_symb_dl + fr * 20 * n_symb_dl + n_symb_dl + (0..3); */
+
+    /* PBCH symb_offset : 48, 48,  72,  72 or 48, 48,  72,  48
+     *                 => 48, 96, 168, 240 or 48, 96, 168, 216 */
+    const unsigned int pbch_ce_start_in_l = (l_of_pbch / 4) * (n_symb_dl == 7 ? 240 : 216) + (l_of_pbch % 4) * 48 + ((l_of_pbch % 4) / 3) * 24;
+    const unsigned int quad_in_l = ((n_symb_dl == 7) && ((l_of_pbch % 4) / 2)) || ((n_symb_dl == 6) && ((l_of_pbch % 4) == 2)) ? 18 : 12;
+    unsigned int l_pos = frame_timing_guess * 10 * 2 * n_symb_dl + (l_of_pbch / 4) * 10 * 2 * n_symb_dl + n_symb_dl + (l_of_pbch % 4);
+    unsigned int scr_word;
+
+    if (tid == 0) {
+        pn_seq_lsb_to_msb(n_id_cell, 32 * 5, pbch_ce_start_in_l * 2, &scr[0]);
+    }
+
+    if (tid < quad_in_l) {
+        /* Every thread handles one quadruplet of PBCH in symbol l position */
+
+        if (((n_symb_dl == 7) && ((l_of_pbch % 4) / 2)) || ((n_symb_dl == 6) && ((l_of_pbch % 4) == 2))) {
+            for (unsigned int i = 0; i < 4; i++) {
+                quad_sym[i].x = d_tfg[l_pos * 72 + tid * 4 + i].x;
+                quad_sym[i].y = d_tfg[l_pos * 72 + tid * 4 + i].y;
+
+                for (unsigned int j = 0; j < 4; j++) {
+                    quad_ce[j][i].x = d_ce_tfg[NUM_OFDM_SYMB_TO_SEARCH * 72 * j + l_pos * 72 + tid * 4 + i].x;
+                    quad_ce[j][i].y = d_ce_tfg[NUM_OFDM_SYMB_TO_SEARCH * 72 * j + l_pos * 72 + tid * 4 + i].y;
+                }
+            }
+        } else {
+            unsigned int k_offset = 0;
+            for (unsigned int i = 0; i < 4; i++) {
+                if (((i + k_offset) % 3) == v_shift_m3)
+                    k_offset++;
+
+                quad_sym[i].x = d_tfg[l_pos * 72 + tid * 6 + i + k_offset].x;
+                quad_sym[i].y = d_tfg[l_pos * 72 + tid * 6 + i + k_offset].y;
+
+                for (unsigned int j = 0; j < 4; j++) {
+                    quad_ce[j][i].x = d_ce_tfg[NUM_OFDM_SYMB_TO_SEARCH * 72 * j + l_pos * 72 + tid * 6 + i + k_offset].x;
+                    quad_ce[j][i].y = d_ce_tfg[NUM_OFDM_SYMB_TO_SEARCH * 72 * j + l_pos * 72 + tid * 6 + i + k_offset].y;
+                }
+            }
+        }
+    }
+
+    __syncthreads();
+
+    // http://en.wikipedia.org/wiki/Space-time_block_coding_based_transmit_diversity
+    // &
+    // demodulate_soft_bits() of itpp4.3.1/itpp/comm/modulator.h
+    // &
+    // un-scrambling
+
+    if ((antt == 0) && (tid < quad_in_l)) {
+        // one antenna port
+        scr_word = scr[tid / 4] >> (((tid * 4) % 16) * 2);
+        for (unsigned int i = 0; i < 4; i++) {
+            pos = frame_timing_guess * 3 * 960 + pbch_ce_start_in_l + tid * 4 + i;
+            inv_scale = 1.0 / CMPLX_SQR(quad_ce[0][i]);
+            np = d_np_v[0] * inv_scale;
+
+            xx = inv_scale * CMPLX_A_MUL_CONJ_B_r(quad_sym[i], quad_ce[0][i]);
+            yy = inv_scale * CMPLX_A_MUL_CONJ_B_i(quad_sym[i], quad_ce[0][i]);
+
+            metric[0] = exp(- SUM_SQR(xx - SQRT2_INV, yy - SQRT2_INV) / np);
+            metric[1] = exp(- SUM_SQR(xx - SQRT2_INV, yy + SQRT2_INV) / np);
+            metric[2] = exp(- SUM_SQR(xx + SQRT2_INV, yy - SQRT2_INV) / np);
+            metric[3] = exp(- SUM_SQR(xx + SQRT2_INV, yy + SQRT2_INV) / np);
+
+            xx = log(metric[0] + metric[1]) - log(metric[2] + metric[3]);
+            yy = log(metric[0] + metric[2]) - log(metric[1] + metric[3]);
+
+            d_soft_bits[pos*2 + 0] = (scr_word & 1) ? -xx : xx;
+            scr_word >>= 1;
+            d_soft_bits[pos*2 + 1] = (scr_word & 1) ? -yy : yy;
+            scr_word >>= 1;
+        }
+    }
+
+    if ((antt == 1) && (tid < quad_in_l)) {
+        // two antenna ports
+        scr_word = scr[tid / 4] >> (((tid * 4) % 16) * 2);
+        for (unsigned int i = 0; i < 4; i += 2) {
+
+            h1.x = (quad_ce[0][i].x + quad_ce[0][i + 1].x) / 2;
+            h1.y = (quad_ce[0][i].y + quad_ce[0][i + 1].y) / 2;
+
+            h2.x = (quad_ce[1][i].x + quad_ce[1][i + 1].x) / 2;
+            h2.y = (quad_ce[1][i].y + quad_ce[1][i + 1].y) / 2;
+
+            np_temp = (d_np_v[0] + d_np_v[1]) / 2;
+
+            pos = (frame_timing_guess * 3 + 1) * 960 + pbch_ce_start_in_l + tid * 4 + i;
+ 
+            inv_scale = 1.0 / (CMPLX_SQR(h1) + CMPLX_SQR(h2));
+            np = np_temp * inv_scale;
+
+            //---------------
+
+            xx = CUDART_SQRT_TWO * inv_scale * (CMPLX_A_MUL_CONJ_B_r(quad_sym[i], h1) + CMPLX_A_MUL_CONJ_B_r(h2, quad_sym[i + 1]));
+            yy = CUDART_SQRT_TWO * inv_scale * (CMPLX_A_MUL_CONJ_B_i(quad_sym[i], h1) + CMPLX_A_MUL_CONJ_B_i(h2, quad_sym[i + 1]));
+
+            metric[0] = exp(- SUM_SQR(xx - SQRT2_INV, yy - SQRT2_INV) / np);
+            metric[1] = exp(- SUM_SQR(xx - SQRT2_INV, yy + SQRT2_INV) / np);
+            metric[2] = exp(- SUM_SQR(xx + SQRT2_INV, yy - SQRT2_INV) / np);
+            metric[3] = exp(- SUM_SQR(xx + SQRT2_INV, yy + SQRT2_INV) / np);
+
+            xx = log(metric[0] + metric[1]) - log(metric[2] + metric[3]);
+            yy = log(metric[0] + metric[2]) - log(metric[1] + metric[3]);
+
+            d_soft_bits[pos*2 + 0] = (scr_word & 1) ? -xx : xx;
+            scr_word >>= 1;
+            d_soft_bits[pos*2 + 1] = (scr_word & 1) ? -yy : yy;
+            scr_word >>= 1;
+
+            //---------------
+
+            xx = CUDART_SQRT_TWO * inv_scale * (- CMPLX_A_MUL_CONJ_B_r(quad_sym[i], h2) + CMPLX_A_MUL_CONJ_B_r(h1, quad_sym[i + 1]));
+            yy = CUDART_SQRT_TWO * inv_scale * (  CMPLX_A_MUL_CONJ_B_i(quad_sym[i], h2) - CMPLX_A_MUL_CONJ_B_i(h1, quad_sym[i + 1]));
+
+            metric[0] = exp(- SUM_SQR(xx - SQRT2_INV, yy - SQRT2_INV) / np);
+            metric[1] = exp(- SUM_SQR(xx - SQRT2_INV, yy + SQRT2_INV) / np);
+            metric[2] = exp(- SUM_SQR(xx + SQRT2_INV, yy - SQRT2_INV) / np);
+            metric[3] = exp(- SUM_SQR(xx + SQRT2_INV, yy + SQRT2_INV) / np);
+
+            xx = log(metric[0] + metric[1]) - log(metric[2] + metric[3]);
+            yy = log(metric[0] + metric[2]) - log(metric[1] + metric[3]);
+
+            d_soft_bits[pos*2 + 2] = (scr_word & 1) ? -xx : xx;
+            scr_word >>= 1;
+            d_soft_bits[pos*2 + 3] = (scr_word & 1) ? -yy : yy;
+            scr_word >>= 1;
+        }
+    }
+
+    if ((antt == 2) && (tid < quad_in_l)) {
+        // four antenna ports
+        scr_word = scr[tid / 4] >> (((tid * 4) % 16) * 2);
+        for (unsigned int i = 0; i < 4; i += 2) {
+
+            h1.x = (quad_ce[i / 2][i].x + quad_ce[i / 2][i + 1].x) / 2;
+            h1.y = (quad_ce[i / 2][i].y + quad_ce[i / 2][i + 1].y) / 2;
+
+            h2.x = (quad_ce[(i / 2) + 2][i].x + quad_ce[(i / 2) + 2][i + 1].x) / 2;
+            h2.y = (quad_ce[(i / 2) + 2][i].y + quad_ce[(i / 2) + 2][i + 1].y) / 2;
+
+            np_temp = (d_np_v[i / 2] + d_np_v[(i / 2) + 2]) / 2;
+
+            pos = (frame_timing_guess * 3 + 2) * 960 + pbch_ce_start_in_l + tid * 4 + i;
+
+            inv_scale = 1.0 / (CMPLX_SQR(h1) + CMPLX_SQR(h2));
+            np = np_temp * inv_scale;
+
+            //---------------
+
+            xx = CUDART_SQRT_TWO * inv_scale * (CMPLX_A_MUL_CONJ_B_r(quad_sym[i], h1) + CMPLX_A_MUL_CONJ_B_r(h2, quad_sym[i + 1]));
+            yy = CUDART_SQRT_TWO * inv_scale * (CMPLX_A_MUL_CONJ_B_i(quad_sym[i], h1) + CMPLX_A_MUL_CONJ_B_i(h2, quad_sym[i + 1]));
+
+            metric[0] = exp(- SUM_SQR(xx - SQRT2_INV, yy - SQRT2_INV) / np);
+            metric[1] = exp(- SUM_SQR(xx - SQRT2_INV, yy + SQRT2_INV) / np);
+            metric[2] = exp(- SUM_SQR(xx + SQRT2_INV, yy - SQRT2_INV) / np);
+            metric[3] = exp(- SUM_SQR(xx + SQRT2_INV, yy + SQRT2_INV) / np);
+
+            xx = log(metric[0] + metric[1]) - log(metric[2] + metric[3]);
+            yy = log(metric[0] + metric[2]) - log(metric[1] + metric[3]);
+
+            d_soft_bits[pos*2 + 0] = (scr_word & 1) ? -xx : xx;
+            scr_word >>= 1;
+            d_soft_bits[pos*2 + 1] = (scr_word & 1) ? -yy : yy;
+            scr_word >>= 1;
+
+            //---------------
+
+            = xx = CUDART_SQRT_TWO * inv_scale * (- CMPLX_A_MUL_CONJ_B_r(quad_sym[i], h2) + CMPLX_A_MUL_CONJ_B_r(h1, quad_sym[i + 1]));
+            = yy = CUDART_SQRT_TWO * inv_scale * (  CMPLX_A_MUL_CONJ_B_i(quad_sym[i], h2) - CMPLX_A_MUL_CONJ_B_i(h1, quad_sym[i + 1]));
+
+            metric[0] = exp(- SUM_SQR(xx - SQRT2_INV, yy - SQRT2_INV) / np);
+            metric[1] = exp(- SUM_SQR(xx - SQRT2_INV, yy + SQRT2_INV) / np);
+            metric[2] = exp(- SUM_SQR(xx + SQRT2_INV, yy - SQRT2_INV) / np);
+            metric[3] = exp(- SUM_SQR(xx + SQRT2_INV, yy + SQRT2_INV) / np);
+
+            xx = log(metric[0] + metric[1]) - log(metric[2] + metric[3]);
+            yy = log(metric[0] + metric[2]) - log(metric[1] + metric[3]);
+
+            d_soft_bits[pos*2 + 2] = (scr_word & 1) ? -xx : xx;
+            scr_word >>= 1;
+            d_soft_bits[pos*2 + 3] = (scr_word & 1) ? -yy : yy;
+            scr_word >>= 1;
+        }
+    }
+}
+
+
+
+/*
+ * De-rate matching
+ */
+__global__ void decode_mib_lower_half_step2_kernel(double *d_soft_bits, int n_symb_dl,
+                                                   // output
+                                                   double *d_subblocks)
+{
+    const unsigned int frame_timing_guess = blockIdx.x; /* frame_timing_guess : 0..3                   */
+    const unsigned int antt = blockIdx.y;               /* number of antenna  : 0 -> 1, 1 -> 2, 2 -> 4 */
+    const unsigned int subblock = blockIdx.z;           /* subblock           : 0, 1, 2                */
+    const unsigned int tid = threadIdx.x;
+    const unsigned int len_of_bit_collection = (n_symb_dl == 7 ? 1920 : 1728);
+    const unsigned int permute_seq[40] = {9,25,17,1,33,13,29,21,5,37,11,27,19,3,35,15,31,23,7,39,8,24,16,0,32,12,28,20,4,36,10,26,18,2,34,14,30,22,6,38};
+    const unsigned int offset = (frame_timing_guess * 3 + antt) * 1920;
+    double sum = 0.0;
+    int count = 0;
+
+    for (unsigned int i = subblock * 40 + tid; i < len_of_bit_collection; i += 120, count++)
+         sum += d_soft_bits[offset + i];
+
+    /* De-interleave 40 points
+
+       Original Sequence :
+
+        x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  0,  1,  2,  3,  4,  5,  6,  7, 
+        8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39
+
+       Permutation Pattern : 
+        1, 17,  9, 25,  5, 21, 13, 29, 3, 19, 11, 27,  7, 23, 15, 31,  0, 16,  8, 24,  4, 20, 12, 28,  2, 18, 10, 26,  6, 22, 14, 30
+
+       Permutated Sequence :
+        x,  x,  x,  1,  x,  x,  x,  5,  x,  x,  x,  3,  x,  x,  x,  7,  x,  x,  x,  0,  x,  x,  x,  4,  x,  x,  x,  2,  x,  x,  x,  6
+        9, 26, 17, 33, 13, 29, 21, 37, 11, 27, 19, 35, 15, 31, 23, 39,  8, 24, 16, 32, 12, 28, 20, 36, 10, 26, 18, 34, 14, 30, 22, 38
+
+       Interleaved Sequence :
+       (1) -> x,  9, x, 26, x, 17, 1, 33, x, 13, x, 29,  x, 21, 5, 37, x, 11, x, 27, x, 19, 3, 35, x, 15, x, 31, x, 23, 7, 39, 
+       (2) -> x,  8, x, 24, x, 16, 0, 32, x, 12, x, 28,  x, 20, 4, 36, x, 10, x, 26, x, 18, 2, 34, x, 14, x, 30, x, 22, 6, 38
+
+        9,25,17,1,33,13,29,21,5,37,11,27,19,3,35,15,31,23,7,39,8,24,16,0,32,12,28,20,4,36,10,26,18,2,34,14,30,22,6,38
+     */
+
+    d_subblocks[(frame_timing_guess * 3 + antt) * 3 * 40 + subblock * 40 + permute_seq[tid]] = sum / count;
+}
+
+
+
+/*
  *  for debug
  */
 __global__ void print_kernel_float(float *d_data, int len)
@@ -3236,6 +3509,16 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
             my_tfg_comp(i,j).imag() = h_lte_decode_aux_data->tfg[i * 72 + j].y;
         }
     }
+
+    decode_mib_lower_half_step1_kernel<<<dim3(4, 3, 16), 18>>>(d_lte_decode_aux_data, n_symb_dl, n_id_cell);
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    decode_mib_lower_half_step2_kernel<<<dim3(4, 3, 3), 40>>>(&(d_lte_decode_aux_data->soft_bits[0]), n_symb_dl,
+                                                              &(d_lte_decode_aux_data->subblocks[0]));
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    checkCudaErrors(cudaMemcpy(h_lte_decode_aux_data, d_lte_decode_aux_data, sizeof(LTE_DECODE_AUX_DATA), cudaMemcpyDeviceToHost));
+    checkCudaErrors(cudaDeviceSynchronize());
 
     free(h_capbuf);
     free(h_lte_decode_aux_data);
