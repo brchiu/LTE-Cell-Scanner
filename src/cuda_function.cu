@@ -2755,7 +2755,7 @@ __global__ void chan_est_four_port_step1_kernel(cuDoubleComplex *d_tfg, int num_
                                                 cuDoubleComplex *d_ce_filt, double *d_err_pwr_acc)
 {
     __shared__ unsigned int rs_dl[3];
-    __shared__ cuDoubleComplex rcvd_rs[12 * 3], tfg_rs, conj_std_rs;
+    __shared__ cuDoubleComplex rcvd_rs[12 * 3];
     __shared__ float ce_err_pwr;
 
     const unsigned int bid = blockIdx.x;
@@ -2778,8 +2778,7 @@ __global__ void chan_est_four_port_step1_kernel(cuDoubleComplex *d_tfg, int num_
     const int k_offset = (v + (n_id_cell % 6)) % 6;
 
     int pos, rs_count;
-    cuDoubleComplex filt;
-
+    cuDoubleComplex tfg_rs, std_rs, filt;
 
     if (tid < 3) {
         const int cinit_rs_no = rs_no - 1 + tid;
@@ -2806,14 +2805,16 @@ __global__ void chan_est_four_port_step1_kernel(cuDoubleComplex *d_tfg, int num_
 
 
         if ((0 <= copy_rs_no) && (copy_rs_no < total_rs)) {
-            tfg_rs.x = d_tfg[(copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12)].x;
-            tfg_rs.y = d_tfg[(copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12)].y;
+            int pos = (copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12);
 
-            conj_std_rs.x =   SQRT2_INV * (1.0 - ((rs_bits & 0x1) * 2));
-            conj_std_rs.y = - SQRT2_INV * (1.0 - (rs_bits & 0x2));
+            tfg_rs.x = d_tfg[pos].x;
+            tfg_rs.y = d_tfg[pos].y;
 
-            rcvd_rs[copy_pos].x = CMPLX_A_MUL_B_r(tfg_rs, conj_std_rs);
-            rcvd_rs[copy_pos].y = CMPLX_A_MUL_B_i(tfg_rs, conj_std_rs);
+            std_rs.x = SQRT2_INV * (1.0 - ((rs_bits & 0x1) * 2));
+            std_rs.y = SQRT2_INV * (1.0 - (rs_bits & 0x2));
+
+            rcvd_rs[copy_pos].x = CMPLX_A_MUL_CONJ_B_r(tfg_rs, std_rs);
+            rcvd_rs[copy_pos].y = CMPLX_A_MUL_CONJ_B_i(tfg_rs, std_rs);
         } else {
             rcvd_rs[copy_pos].x = 0.0;
             rcvd_rs[copy_pos].y = 0.0;
@@ -3238,8 +3239,8 @@ __global__ void decode_mib_lower_half_step1_kernel(LTE_DECODE_AUX_DATA *d_lte_de
 
             //---------------
 
-            = xx = CUDART_SQRT_TWO * inv_scale * (- CMPLX_A_MUL_CONJ_B_r(quad_sym[i], h2) + CMPLX_A_MUL_CONJ_B_r(h1, quad_sym[i + 1]));
-            = yy = CUDART_SQRT_TWO * inv_scale * (  CMPLX_A_MUL_CONJ_B_i(quad_sym[i], h2) - CMPLX_A_MUL_CONJ_B_i(h1, quad_sym[i + 1]));
+            xx = CUDART_SQRT_TWO * inv_scale * (- CMPLX_A_MUL_CONJ_B_r(quad_sym[i], h2) + CMPLX_A_MUL_CONJ_B_r(h1, quad_sym[i + 1]));
+            yy = CUDART_SQRT_TWO * inv_scale * (  CMPLX_A_MUL_CONJ_B_i(quad_sym[i], h2) - CMPLX_A_MUL_CONJ_B_i(h1, quad_sym[i + 1]));
 
             metric[0] = exp(- SUM_SQR(xx - SQRT2_INV, yy - SQRT2_INV) / np);
             metric[1] = exp(- SUM_SQR(xx - SQRT2_INV, yy + SQRT2_INV) / np);
