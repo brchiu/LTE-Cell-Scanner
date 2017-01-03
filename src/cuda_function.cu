@@ -172,8 +172,11 @@ typedef struct {
     cuDoubleComplex  pbch_sym[4 * 3 * 960];
     double           np[4 * 3 * 960];
     double           soft_bits[4 * 3 * 1920];
-
     double           subblocks[4 * 3 * 3 * 40];
+
+    /* used in convolutional decoder, specified for data of 40-bits length like PBCH */
+    double           metrics[4 * 3 * 64];
+    unsigned int     pbch_bits[4 * 3 * 64];
 
 } LTE_DECODE_AUX_DATA;
 
@@ -2773,7 +2776,7 @@ __global__ void chan_est_four_port_step1_kernel(cuDoubleComplex *d_tfg, int num_
     const int rs_per_slot = 1 << port01;
     const int total_rs = num_slot * rs_per_slot;
     const int rs_slot = (rs_no / rs_per_slot) % 20;
-    const int l_rs = port01 * ((rs_no & 1) * (n_symb_dl - 3)) + port23;
+    // const int l_rs = port01 * ((rs_no & 1) * (n_symb_dl - 3)) + port23;
     const int v = port01 * ((port & 1) ^ (rs_no & 1)) * 3 + port23 * ((port & 1) + (rs_slot & 1)) * 3;
     const int k_offset = (v + (n_id_cell % 6)) % 6;
 
@@ -3003,7 +3006,7 @@ __global__ void chan_est_four_port_step3_kernel(cuDoubleComplex *d_tfg, cuDouble
                 double slope = 1.0 * x[1] / (x[2] - x[1]);
                 row[0].x = row[1].x - slope * (row[2].x - row[1].x);
                 row[0].y = row[1].y - slope * (row[2].y - row[1].y);
- 
+
                 x[0] = 0;
                 len++;
             }
@@ -3035,7 +3038,7 @@ __global__ void chan_est_four_port_step3_kernel(cuDoubleComplex *d_tfg, cuDouble
 
     //  shift (1,4) or (4,1) : 26 triangles, (index of smaller k_offset) * 2
     //
-    //  x 0   1   2   3                   9    10    11    x 
+    //  x 0   1   2   3                   9    10    11    x
     //  x   0   1   2   3                    9    10    11 x
     //  x 0   1   2   3                   9    10    11    x
 
@@ -3159,7 +3162,7 @@ __global__ void decode_mib_lower_half_step1_kernel(LTE_DECODE_AUX_DATA *d_lte_de
             np_temp = (d_np_v[0] + d_np_v[1]) / 2;
 
             pos = (frame_timing_guess * 3 + 1) * 960 + pbch_ce_start_in_l + tid * 4 + i;
- 
+
             inv_scale = 1.0 / (CMPLX_SQR(h1) + CMPLX_SQR(h2));
             np = np_temp * inv_scale;
 
@@ -3273,21 +3276,22 @@ __global__ void decode_mib_lower_half_step2_kernel(double *d_soft_bits, int n_sy
     const unsigned int tid = threadIdx.x;
     const unsigned int len_of_bit_collection = (n_symb_dl == 7 ? 1920 : 1728);
     const unsigned int permute_seq[40] = {9,25,17,1,33,13,29,21,5,37,11,27,19,3,35,15,31,23,7,39,8,24,16,0,32,12,28,20,4,36,10,26,18,2,34,14,30,22,6,38};
-    const unsigned int offset = (frame_timing_guess * 3 + antt) * 1920;
+    const unsigned int offset1 = (frame_timing_guess * 3 + antt) * 1920;
+    const unsigned int offset2 = (frame_timing_guess * 3 + antt) * 120;
     double sum = 0.0;
     int count = 0;
 
     for (unsigned int i = subblock * 40 + tid; i < len_of_bit_collection; i += 120, count++)
-         sum += d_soft_bits[offset + i];
+         sum += d_soft_bits[offset1 + i];
 
     /* De-interleave 40 points
 
        Original Sequence :
 
-        x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  0,  1,  2,  3,  4,  5,  6,  7, 
+        x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  x,  0,  1,  2,  3,  4,  5,  6,  7,
         8,  9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39
 
-       Permutation Pattern : 
+       Permutation Pattern :
         1, 17,  9, 25,  5, 21, 13, 29, 3, 19, 11, 27,  7, 23, 15, 31,  0, 16,  8, 24,  4, 20, 12, 28,  2, 18, 10, 26,  6, 22, 14, 30
 
        Permutated Sequence :
@@ -3295,13 +3299,237 @@ __global__ void decode_mib_lower_half_step2_kernel(double *d_soft_bits, int n_sy
         9, 26, 17, 33, 13, 29, 21, 37, 11, 27, 19, 35, 15, 31, 23, 39,  8, 24, 16, 32, 12, 28, 20, 36, 10, 26, 18, 34, 14, 30, 22, 38
 
        Interleaved Sequence :
-       (1) -> x,  9, x, 26, x, 17, 1, 33, x, 13, x, 29,  x, 21, 5, 37, x, 11, x, 27, x, 19, 3, 35, x, 15, x, 31, x, 23, 7, 39, 
+       (1) -> x,  9, x, 26, x, 17, 1, 33, x, 13, x, 29,  x, 21, 5, 37, x, 11, x, 27, x, 19, 3, 35, x, 15, x, 31, x, 23, 7, 39,
        (2) -> x,  8, x, 24, x, 16, 0, 32, x, 12, x, 28,  x, 20, 4, 36, x, 10, x, 26, x, 18, 2, 34, x, 14, x, 30, x, 22, 6, 38
 
         9,25,17,1,33,13,29,21,5,37,11,27,19,3,35,15,31,23,7,39,8,24,16,0,32,12,28,20,4,36,10,26,18,2,34,14,30,22,6,38
      */
 
-    d_subblocks[(frame_timing_guess * 3 + antt) * 3 * 40 + subblock * 40 + permute_seq[tid]] = sum / count;
+    d_subblocks[offset2 + permute_seq[tid] * 3 + subblock] = sum / count;
+}
+
+
+
+/*
+ *
+ */
+__global__ void decode_mib_lower_half_step3_kernel(double *d_subblocks,
+                                                   // output
+                                                   double *d_metrics, unsigned int *d_pbch_bits)
+{
+    __shared__ int FSM_output[64][2];
+    __shared__ int path_memory[64][40];
+    __shared__ int visited_state_buffer[2][64];
+    __shared__ double delta_metrics[40][8];
+    __shared__ double metric_buffer[2][64];
+
+    const unsigned int frame_timing_guess = blockIdx.x; /* frame_timing_guess : 0..3                   */
+    const unsigned int antt = blockIdx.y;               /* number of antenna  : 0 -> 1, 1 -> 2, 2 -> 4 */
+    const unsigned int init_state = blockIdx.z;         /* initial state, i.e. ss in decode_tailbite() */
+    const unsigned int tid = threadIdx.x;
+    const unsigned int state = threadIdx.x;
+    const unsigned int S0 = (state << 1) & 63;
+    const unsigned int S1 = S0 | 1;
+
+    const unsigned int offset1 = (frame_timing_guess * 3 + antt) * 120;
+    const unsigned int offset2 = (frame_timing_guess * 3 + antt) * 64;
+    int *visited_state, *temp_visited_state;
+    double *sum_metric, *temp_sum_metric;
+    double d0, d1, d2;
+
+    // generator 5B 79 75
+    //
+    // d0(k) = 1 * c(k) + 0 * c(k-1) + 1 * c(k-2) + 1 * c(k-3) + 0 * c(k-4) + 1 * c(k-5) + 1 * c(k-6)
+    // d1(k) = 1 * c(k) + 1 * c(k-1) + 1 * c(k-2) + 1 * c(k-3) + 0 * c(k-4) + 0 * c(k-5) + 1 * c(k-6)
+    // d2(k) = 1 * c(k) + 1 * c(k-1) + 1 * c(k-2) + 0 * c(k-3) + 1 * c(k-4) + 0 * c(k-5) + 1 * c(k-6)
+
+    // state = (c(k-1), c(k-2), c(k-3), c(k-4), c(k-5), c(k-6))
+
+    // temp_state = (state << 1) | 1;
+    // temp = temp_state & gen_pol(j)
+    // one_bit = temp & 1;
+    // temp = temp >> 1;
+
+    // temp = (((state << 1) | 1) & gen_pol(j)) >> 1
+
+    // one_output = (one_output << 1) | int(xor_int_table(temp) ^ one_bit);
+    // zero_output = (zero_output << 1) | int(xor_int_table(temp));
+
+    unsigned int bit0, bit1, bit2;
+
+    bit0 = (((state << 1) | 1) & 0133) >> 1;
+    bit0 ^= (bit0 >> 16);
+    bit0 ^= (bit0 >>  8);
+    bit0 ^= (bit0 >>  4);
+    bit0 &= 0xf;
+    bit0 = (0x6996 >> bit0) & 1;
+
+    bit1 = (((state << 1) | 1) & 0171) >> 1;
+    bit1 ^= (bit1 >> 16);
+    bit1 ^= (bit1 >>  8);
+    bit1 ^= (bit1 >>  4);
+    bit1 &= 0xf;
+    bit1 = (0x6996 >> bit1) & 1;
+
+    bit2 = (((state << 1) | 1) & 0165) >> 1;
+    bit2 ^= (bit2 >> 16);
+    bit2 ^= (bit2 >>  8);
+    bit2 ^= (bit2 >>  4);
+    bit2 &= 0xf;
+    bit2 = (0x6996 >> bit2) & 1;
+
+    FSM_output[state][0] = (bit0 << 2) | (bit1 << 1) | (bit2);
+    FSM_output[state][1] = FSM_output[state][0] ^ 0x7;
+
+    // implement calc_metric()
+
+    if (tid < 40) {
+        d0 = d_subblocks[offset1 + tid * 3 + 0];
+        d1 = d_subblocks[offset1 + tid * 3 + 1];
+        d2 = d_subblocks[offset1 + tid * 3 + 2];
+
+        delta_metrics[tid][0] = - d0 - d1 - d2;
+        delta_metrics[tid][1] = - d0 - d1 + d2;
+        delta_metrics[tid][2] = - d0 + d1 - d2;
+        delta_metrics[tid][3] = - d0 + d1 + d2;
+        delta_metrics[tid][4] =   d0 - d1 - d2;
+        delta_metrics[tid][5] =   d0 - d1 + d2;
+        delta_metrics[tid][6] =   d0 + d1 - d2;
+        delta_metrics[tid][7] =   d0 + d1 + d2;
+    }
+
+    visited_state_buffer[0][tid] = (state == init_state ? 1 : 0);
+    visited_state_buffer[1][tid] = 0;
+    metric_buffer[0][tid] = metric_buffer[1][tid] = 0.0;
+
+    __syncthreads();
+
+    visited_state      = (int *)&visited_state_buffer[0];
+    sum_metric         = (double *)&metric_buffer[0];
+    temp_visited_state = (int *)&visited_state_buffer[1];
+    temp_sum_metric    = (double *)&metric_buffer[1];
+
+    int ptr = 1;
+    for (unsigned int l = 0; l < 40; l++) {
+        double temp_metric_zero, temp_metric_one;
+
+        if (visited_state[S0]) { // expand trellis if state S0 is visited
+            temp_metric_zero = sum_metric[S0] + delta_metrics[l][FSM_output[state][0]];
+            temp_visited_state[state] = 1;
+        } else {
+            temp_metric_zero = CUDART_INF;
+        }
+
+        if (visited_state[S1]) { // expand trellis if state S01 is visited
+            temp_metric_one = sum_metric[S1] + delta_metrics[l][FSM_output[state][1]];
+            temp_visited_state[state] = 1;
+        } else {
+            temp_metric_one = CUDART_INF;
+        }
+
+        if (temp_metric_zero < temp_metric_one) { // path zero survives
+            temp_sum_metric[state] = temp_metric_zero;
+            path_memory[state][l] = 0;
+        } else { // path one survives
+            temp_sum_metric[state] = temp_metric_one;
+            path_memory[state][l] = 1;
+        }
+
+        __syncthreads();
+
+        visited_state      = (int *)&visited_state_buffer[ptr];
+        sum_metric         = (double *)&metric_buffer[ptr];
+
+        ptr ^= 1;
+
+        temp_visited_state = (int *)&visited_state_buffer[ptr];
+        temp_sum_metric    = (double *)&metric_buffer[ptr];
+    }
+
+
+    //
+    if (tid == 0) {
+        // minimum metric is the ss state due to the tailbite
+        int min_metric_state = init_state;
+        unsigned int pbch_bits = 0, crc_bits = 0;
+
+        // trace back to calculate output sequence, 16 bit crc
+        for (int l = 40 - 1; l >= 24; l--) {
+            crc_bits |= ((min_metric_state >> (6 - 1)) & 1) << (39 + 16 - l);
+            min_metric_state = (((min_metric_state << 1) | path_memory[min_metric_state][l]) & 63);
+        }
+
+        // trace back to calculate output sequence, 16 bit crc
+        for (int l = 23; l >= 0; l--) {
+            pbch_bits |= ((min_metric_state >> (6 - 1)) & 1) << (23 + 8 - l);
+            min_metric_state = (((min_metric_state << 1) | path_memory[min_metric_state][l]) & 63);
+        }
+
+        // 16-bit CRC
+
+        // 1 0 0 0 | 1 0 0 0 | 0 0 0 1 | 0 0 0 0 | 1
+        // polynomial (MSB locates at the most left bit) = 0x88108000
+        //
+        // poly=bvec("1 0 0 0 1 0 0 0 0 0 0 1 0 0 0 0 1");
+        unsigned int poly16 = 0x88108000;
+        unsigned int crc_check = pbch_bits;
+        for (unsigned int i = 0; i < 24; i++) {
+            if (crc_check & 0x80000000)
+                crc_check ^= poly16;
+            crc_check <<= 1;
+        }
+
+        if (antt == 1)
+            crc_check ^= 0xFFFF0000;
+        else if (antt == 2)
+            crc_check ^= 0x55550000;
+
+        if (crc_bits == crc_check) {
+            d_metrics[offset2 + init_state] = sum_metric[init_state];
+            d_pbch_bits[offset2 + init_state] = pbch_bits;
+        } else {
+            d_metrics[offset2 + init_state] = -CUDART_INF;
+            d_pbch_bits[offset2 + init_state] = 0;
+        }
+    }
+
+}
+
+
+
+/*
+ *
+ */
+__global__ void decode_mib_lower_half_step4_kernel(double *d_metrics, unsigned int *d_pbch_bits)
+{
+    __shared__ double metrics[64];
+    __shared__ int    pbch_bits[64];
+
+    const unsigned int frame_timing_guess = blockIdx.x; /* frame_timing_guess : 0..3                   */
+    const unsigned int antt = blockIdx.y;               /* number of antenna  : 0 -> 1, 1 -> 2, 2 -> 4 */
+    const unsigned int tid = threadIdx.x;
+    const unsigned int offset = (frame_timing_guess * 3 + antt) * 64;
+
+    metrics[tid] = d_metrics[offset + tid];
+    metrics[tid + 32] = d_metrics[offset + tid + 32];
+    pbch_bits[tid] = d_pbch_bits[offset + tid];
+    pbch_bits[tid + 32] = d_pbch_bits[offset + tid + 32];
+
+    __syncthreads();
+
+    for (unsigned int s = 32; s > 0; s >>= 1) {
+        if (tid < s) {
+            if (metrics[tid] < metrics[tid + s]) {
+                SWAP(metrics[tid], metrics[tid + s]);
+                SWAP(pbch_bits[tid], pbch_bits[tid + s]);
+            }
+        }
+        __syncthreads();
+    }
+
+    if ((tid == 0) && (metrics[0] != -CUDART_INF)) {
+        printf("step4 frame_timing_guess %d antt %d sum_metric %lf phch_bits %08X crc_bits %08X crc_check %08X\n", frame_timing_guess, antt, metrics[0], pbch_bits[0]);
+    }
 }
 
 
@@ -3562,6 +3790,14 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
 
     decode_mib_lower_half_step2_kernel<<<dim3(4, 3, 3), 40>>>(&(d_lte_decode_aux_data->soft_bits[0]), n_symb_dl,
                                                               &(d_lte_decode_aux_data->subblocks[0]));
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    decode_mib_lower_half_step3_kernel<<<dim3(4, 3, 64), 64>>>(&(d_lte_decode_aux_data->subblocks[0]),
+                                                               &(d_lte_decode_aux_data->metrics[0]),
+                                                               &(d_lte_decode_aux_data->pbch_bits[0]));
+    checkCudaErrors(cudaDeviceSynchronize());
+
+    decode_mib_lower_half_step4_kernel<<<dim3(4, 3), 32>>>(&(d_lte_decode_aux_data->metrics[0]), &(d_lte_decode_aux_data->pbch_bits[0]));
     checkCudaErrors(cudaDeviceSynchronize());
 
     checkCudaErrors(cudaMemcpy(h_lte_decode_aux_data, d_lte_decode_aux_data, sizeof(LTE_DECODE_AUX_DATA), cudaMemcpyDeviceToHost));
