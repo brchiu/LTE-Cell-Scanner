@@ -1416,7 +1416,7 @@ __device__ void sss_detect_ml_helper_function(float *sss_np_est, cuDoubleComplex
 
     real = sss_try_orig[tid] * coeff.x - sss_est[tid].x;
     imag = sss_try_orig[tid] * coeff.y - sss_est[tid].y;
-    buffer2[tid] = - (real * real + imag * imag) / sss_np_est[tid];
+    buffer2[tid] = - SUM_SQR(real, imag) / sss_np_est[tid];
 
     __syncthreads();
 
@@ -2349,8 +2349,7 @@ __global__ void extract_tfg_singleblock_kernel(cuDoubleComplex *d_capbuf, cuDoub
 /*
  *
  */
-__global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extracted, double *d_tfg_timestamp,
-                             unsigned short n_id_cell, int n_symb_dl,
+__global__ void tfoec_kernel(LTE_DECODE_AUX_DATA *d_lte_decode_aux_data, unsigned int thread_num, unsigned short n_id_cell, int n_symb_dl,
                              double fc_requested, double fc_programmed, double fs_programmed,
                              // output
                              double *d_residual_f)
@@ -2359,8 +2358,12 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
     __shared__ float foe_real, foe_imag;
     __shared__ float toe_real, toe_imag;
 
+    cuDoubleComplex *d_tfg = (cuDoubleComplex *)&(d_lte_decode_aux_data->tfg[0]);
+    cuDoubleComplex *d_rs_extracted = (cuDoubleComplex *)&(d_lte_decode_aux_data->ce_filt[0]);
+    double *d_tfg_timestamp = (double *)&(d_lte_decode_aux_data->tfg_timestamp[0]);
 
     const unsigned int tid = threadIdx.x;
+    const unsigned int tid2 = threadIdx.x + thread_num;
     double dft_location;
     double late;
 
@@ -2454,6 +2457,8 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
         double real, imag;
         double theta;
 
+        //-------
+
         theta = 2 * CUDART_PI * ((-residual_f) * dft_location / (FS_LTE / 16) - (late * i / 128));
 
         coeff.x = cos(theta);
@@ -2465,6 +2470,14 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
         d_tfg[tid * 72 + 35 + i].x = real;
         d_tfg[tid * 72 + 35 + i].y = imag;
 
+        real = CMPLX_A_MUL_B_r(d_tfg[tid2 * 72 + 35 + i], coeff);
+        imag = CMPLX_A_MUL_B_i(d_tfg[tid2 * 72 + 35 + i], coeff);
+
+        d_tfg[tid2 * 72 + 35 + i].x = real;
+        d_tfg[tid2 * 72 + 35 + i].y = imag;
+
+        //-------
+
         theta = 2 * CUDART_PI * ((-residual_f) * dft_location / (FS_LTE / 16) + (late * i / 128));
 
         coeff.x = cos(theta);
@@ -2475,6 +2488,12 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
 
         d_tfg[tid * 72 + 36 - i].x = real;
         d_tfg[tid * 72 + 36 - i].y = imag;
+
+        real = CMPLX_A_MUL_B_r(d_tfg[tid2 * 72 + 36 - i], coeff);
+        imag = CMPLX_A_MUL_B_i(d_tfg[tid2 * 72 + 36 - i], coeff);
+
+        d_tfg[tid2 * 72 + 36 - i].x = real;
+        d_tfg[tid2 * 72 + 36 - i].y = imag;
     }
 
     __syncthreads();
@@ -2580,6 +2599,18 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
 
         d_tfg[tid * 72 + 36 - i].x = real;
         d_tfg[tid * 72 + 36 - i].y = imag;
+
+        real = CMPLX_A_MUL_B_r(d_tfg[tid2 * 72 + 35 + i], coeff);
+        imag = CMPLX_A_MUL_B_i(d_tfg[tid2 * 72 + 35 + i], coeff);
+
+        d_tfg[tid2 * 72 + 35 + i].x = real;
+        d_tfg[tid2 * 72 + 35 + i].y = imag;
+
+        real = CMPLX_A_MUL_CONJ_B_r(d_tfg[tid2 * 72 + 36 - i], coeff);
+        imag = CMPLX_A_MUL_CONJ_B_i(d_tfg[tid2 * 72 + 36 - i], coeff);
+
+        d_tfg[tid2 * 72 + 36 - i].x = real;
+        d_tfg[tid2 * 72 + 36 - i].y = imag;
     }
 }
 
@@ -3695,11 +3726,9 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
                                                         fc_requested, fc_programmed, fs_programmed, cell_out.freq_fine);
     checkCudaErrors(cudaDeviceSynchronize());
 
-    tfoec_kernel<<<1, n_ofdm_sym>>>(&(d_lte_decode_aux_data->tfg[0]), &(d_lte_decode_aux_data->ce_filt[0]), &(d_lte_decode_aux_data->tfg_timestamp[0]),
-                                    n_id_cell, n_symb_dl,
-                                    fc_requested, fc_programmed, fs_programmed,
-                                    // output
-                                    d_residual_f);
+    tfoec_kernel<<<1, (n_ofdm_sym / 2)>>>(d_lte_decode_aux_data, (n_ofdm_sym / 2), n_id_cell, n_symb_dl, fc_requested, fc_programmed, fs_programmed,
+                                          // output
+                                          d_residual_f);
     checkCudaErrors(cudaDeviceSynchronize());
 
     checkCudaErrors(cudaMemcpy(&h_residual_f, d_residual_f, sizeof(double), cudaMemcpyDeviceToHost));
