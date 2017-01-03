@@ -528,9 +528,9 @@ __global__ void sp_incoherent_kernel(cuDoubleComplex *d_capbuf, double *d_sp_inc
     double value;
 
     if (tid < 274 + 16) {
-        value = d_capbuf[index].x * d_capbuf[index].x + d_capbuf[index].y * d_capbuf[index].y;
+        value = SUM_SQR(d_capbuf[index].x, d_capbuf[index].y);
         for (unsigned int m = 1; m < n_comb_sp; m++) {
-            value += (d_capbuf[index + 9600 * m].x * d_capbuf[index + 9600 * m].x + d_capbuf[index + 9600 * m].y * d_capbuf[index + 9600 * m].y);
+            value += SUM_SQR(d_capbuf[index + 9600 * m].x, d_capbuf[index + 9600 * m].y);
         }
         s_sqr[tid] = value;
     } else {
@@ -1246,7 +1246,7 @@ __global__ void sss_detect_getce_sss_singleblock_kernel(cuDoubleComplex *d_capbu
     for (unsigned int i = 0, col = (tid & 1) * 62; i < 62; i++, col++) {
          float sss_np_est_value;
 
-         sss_np_est_value = ((h_sm[i].x * h_sm[i].x) + (h_sm[i].y * h_sm[i].y)) / pss_np;
+         sss_np_est_value = SUM_SQR(h_sm[i].x, h_sm[i].y) / pss_np;
          atomicAdd(&sss_h12_np_est[col], sss_np_est_value);
     }
 
@@ -1306,16 +1306,16 @@ __global__ void sss_detect_getce_sss_singleblock_kernel(cuDoubleComplex *d_capbu
 
          real = imag = sss_h12_np_est[col] * pss_np_inv_SQRT128_INV;
 
-         real *= (h_sm[i].x * s_capbuf[97 + i].x + h_sm[i].y * s_capbuf[97 + i].y);
-         imag *= (h_sm[i].x * s_capbuf[97 + i].y - h_sm[i].y * s_capbuf[97 + i].x);
+         real *= CMPLX_A_MUL_CONJ_B_r(s_capbuf[97 + i], h_sm[i]);
+         imag *= CMPLX_A_MUL_CONJ_B_i(s_capbuf[97 + i], h_sm[i]);
 
          atomicAdd(&sss_h12_ext_est[col].x, real);
          atomicAdd(&sss_h12_ext_est[col].y, imag);
 
          real = imag = sss_h12_np_est[col + 31] * pss_np_inv_SQRT128_INV;
 
-         real *= (h_sm[i + 31].x * s_capbuf[1 + i].x + h_sm[i + 31].y * s_capbuf[1 + i].y);
-         imag *= (h_sm[i + 31].x * s_capbuf[1 + i].y - h_sm[i + 31].y * s_capbuf[1 + i].x);
+         real *= CMPLX_A_MUL_CONJ_B_r(s_capbuf[1 + i], h_sm[i + 31]);
+         imag *= CMPLX_A_MUL_CONJ_B_i(s_capbuf[1 + i], h_sm[i + 31]);
 
          atomicAdd(&sss_h12_ext_est[col + 31].x, real);
          atomicAdd(&sss_h12_ext_est[col + 31].y, imag);
@@ -1346,16 +1346,16 @@ __global__ void sss_detect_getce_sss_singleblock_kernel(cuDoubleComplex *d_capbu
 
          real = imag = sss_h12_np_est[col] * pss_np_inv_SQRT128_INV;
 
-         real *= (h_sm[i].x * s_capbuf[97 + i].x + h_sm[i].y * s_capbuf[97 + i].y);
-         imag *= (h_sm[i].x * s_capbuf[97 + i].y - h_sm[i].y * s_capbuf[97 + i].x);
+         real *= CMPLX_A_MUL_CONJ_B_r(s_capbuf[97 + i], h_sm[i]);
+         imag *= CMPLX_A_MUL_CONJ_B_i(s_capbuf[97 + i], h_sm[i]);
 
          atomicAdd(&sss_h12_nrm_est[col].x, real);
          atomicAdd(&sss_h12_nrm_est[col].y, imag);
 
          real = imag = sss_h12_np_est[col + 31] * pss_np_inv_SQRT128_INV;
 
-         real *= (h_sm[i + 31].x * s_capbuf[1 + i].x + h_sm[i + 31].y * s_capbuf[1 + i].y);
-         imag *= (h_sm[i + 31].x * s_capbuf[1 + i].y - h_sm[i + 31].y * s_capbuf[1 + i].x);
+         real *= CMPLX_A_MUL_CONJ_B_r(s_capbuf[1 + i], h_sm[i + 1]);
+         imag *= CMPLX_A_MUL_CONJ_B_i(s_capbuf[1 + i], h_sm[i + 1]);
 
          atomicAdd(&sss_h12_nrm_est[col + 31].x, real);
          atomicAdd(&sss_h12_nrm_est[col + 31].y, imag);
@@ -1753,7 +1753,7 @@ __global__ void pss_sss_foe_multiblocks_step1_kernel(cuDoubleComplex *d_capbuf, 
     if (tid < 62) {
         double noise_r = acc.x - h_raw_fo_pss[tid].x;
         double noise_i = acc.y - h_raw_fo_pss[tid].y;
-        atomicAdd(&pss_np, (float)(noise_r * noise_r + noise_i * noise_i));
+        atomicAdd(&pss_np, (float)SUM_SQR(noise_r, noise_i));
     }
 
     __syncthreads();
@@ -2339,10 +2339,8 @@ __global__ void extract_tfg_singleblock_kernel(cuDoubleComplex *d_capbuf, cuDoub
         d_tfg[tid * 72 + 35 + i].x = SQRT128_INV * CMPLX_A_MUL_B_r(s_capbuf[i], coeff);
         d_tfg[tid * 72 + 35 + i].y = SQRT128_INV * CMPLX_A_MUL_B_i(s_capbuf[i], coeff);
 
-        coeff.y = -coeff.y;
-
-        d_tfg[tid * 72 + 36 - i].x = SQRT128_INV * CMPLX_A_MUL_B_r(s_capbuf[128 - i], coeff);
-        d_tfg[tid * 72 + 36 - i].y = SQRT128_INV * CMPLX_A_MUL_B_i(s_capbuf[128 - i], coeff);
+        d_tfg[tid * 72 + 36 - i].x = SQRT128_INV * CMPLX_A_MUL_CONJ_B_r(s_capbuf[128 - i], coeff);
+        d_tfg[tid * 72 + 36 - i].y = SQRT128_INV * CMPLX_A_MUL_CONJ_B_i(s_capbuf[128 - i], coeff);
     }
 }
 
@@ -2403,10 +2401,8 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
 
             rcvd_rs = d_tfg[(slot * n_symb_dl + l) * 72 + v_offset];
 
-            std_rs.y = -std_rs.y;
-
-            d_rs_extracted[((tid & 1) * 122 + (tid / 2)) * 12 + i].x = CMPLX_A_MUL_B_r(rcvd_rs, std_rs);
-            d_rs_extracted[((tid & 1) * 122 + (tid / 2)) * 12 + i].y = CMPLX_A_MUL_B_i(rcvd_rs, std_rs);
+            d_rs_extracted[((tid & 1) * 122 + (tid / 2)) * 12 + i].x = CMPLX_A_MUL_CONJ_B_r(rcvd_rs, std_rs);
+            d_rs_extracted[((tid & 1) * 122 + (tid / 2)) * 12 + i].y = CMPLX_A_MUL_CONJ_B_i(rcvd_rs, std_rs);
         }
     }
 
@@ -2425,16 +2421,14 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
             rs_1 = d_rs_extracted[(0 + tid + 0) * 12 + i];
             rs_2 = d_rs_extracted[(0 + tid + 1) * 12 + i];
 
-            rs_1.y = -rs_1.y;
-            real += CMPLX_A_MUL_B_r(rs_1, rs_2);
-            imag += CMPLX_A_MUL_B_i(rs_1, rs_2);
+            real += CMPLX_A_MUL_CONJ_B_r(rs_2, rs_1);
+            imag += CMPLX_A_MUL_CONJ_B_i(rs_2, rs_1);
 
             rs_1 = d_rs_extracted[(122 + tid + 0) * 12 + i];
             rs_2 = d_rs_extracted[(122 + tid + 1) * 12 + i];
 
-            rs_1.y = -rs_1.y;
-            real += CMPLX_A_MUL_B_r(rs_1, rs_2);
-            imag += CMPLX_A_MUL_B_i(rs_1, rs_2);
+            real += CMPLX_A_MUL_CONJ_B_r(rs_2, rs_1);
+            imag += CMPLX_A_MUL_CONJ_B_i(rs_2, rs_1);
         }
 
         atomicAdd(&foe_real, real);
@@ -2531,33 +2525,26 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
 
             rcvd_rs = d_tfg[(slot1 * n_symb_dl + l1) * 72 + v_offset1];
 
-            std_rs.y = -std_rs.y;
-
-            r1v.x =  CMPLX_A_MUL_B_r(rcvd_rs, std_rs);
-            r1v.y = -CMPLX_A_MUL_B_i(rcvd_rs, std_rs); // this r1v is actually conj(r1v)
+            r1v.x = CMPLX_A_MUL_CONJ_B_r(rcvd_rs, std_rs);
+            r1v.y = CMPLX_A_MUL_CONJ_B_i(rcvd_rs, std_rs);
 
             std_rs.x = SQRT2_INV * (1.0 - ((rs_bits2 & 1) * 2));
             std_rs.y = SQRT2_INV * (1.0 - ((rs_bits2 & 2)));
 
-            std_rs.y = -std_rs.y;
-
             rcvd_rs = d_tfg[(slot2 * n_symb_dl + l2) * 72 + v_offset2];
 
-            r2v.x = CMPLX_A_MUL_B_r(rcvd_rs, std_rs);
-            r2v.y = CMPLX_A_MUL_B_i(rcvd_rs, std_rs);
+            r2v.x = CMPLX_A_MUL_CONJ_B_r(rcvd_rs, std_rs);
+            r2v.y = CMPLX_A_MUL_CONJ_B_i(rcvd_rs, std_rs);
 
             // elem_mult(conj(r1v), r2v)
 
-            toe1.x += CMPLX_A_MUL_B_r(r1v, r2v);
-            toe1.y += CMPLX_A_MUL_B_i(r1v, r2v);
-
-            r1v.y = -r1v.y;
-            r2v.y = -r2v.y;   // this r2v is actually conj(r2v)
+            toe1.x += CMPLX_A_MUL_CONJ_B_r(r2v, r1v);
+            toe1.y += CMPLX_A_MUL_CONJ_B_i(r2v, r1v);
 
             // elem_mult(conj(r2v(i-1)), r1v(i))
 
-            toe2.x += CMPLX_A_MUL_B_r(r1v, r2v_prev);
-            toe2.y += CMPLX_A_MUL_B_i(r1v, r2v_prev);
+            toe2.x += CMPLX_A_MUL_CONJ_B_r(r1v, r2v_prev);
+            toe2.y += CMPLX_A_MUL_CONJ_B_i(r1v, r2v_prev);
 
             r2v_prev = r2v;
         }
@@ -2588,10 +2575,8 @@ __global__ void tfoec_kernel(cuDoubleComplex *d_tfg, cuDoubleComplex *d_rs_extra
         d_tfg[tid * 72 + 35 + i].x = real;
         d_tfg[tid * 72 + 35 + i].y = imag;
 
-        coeff.y = -coeff.y;
-
-        real = CMPLX_A_MUL_B_r(d_tfg[tid * 72 + 36 - i], coeff);
-        imag = CMPLX_A_MUL_B_i(d_tfg[tid * 72 + 36 - i], coeff);
+        real = CMPLX_A_MUL_CONJ_B_r(d_tfg[tid * 72 + 36 - i], coeff);
+        imag = CMPLX_A_MUL_CONJ_B_i(d_tfg[tid * 72 + 36 - i], coeff);
 
         d_tfg[tid * 72 + 36 - i].x = real;
         d_tfg[tid * 72 + 36 - i].y = imag;
@@ -2609,7 +2594,7 @@ __global__ void chan_est_kernel(cuDoubleComplex *d_tfg, int num_slot, int ant_po
                                 cuDoubleComplex *d_ce_filt, double *d_err_pwr_acc)
 {
     __shared__ unsigned int rs_dl[3];
-    __shared__ cuDoubleComplex rcvd_rs[12 * 3], tfg_rs, conj_std_rs;
+    __shared__ cuDoubleComplex rcvd_rs[12 * 3], tfg_rs, std_rs;
     __shared__ float ce_err_pwr;
 
     const unsigned int bid = blockIdx.x;
@@ -2662,11 +2647,11 @@ __global__ void chan_est_kernel(cuDoubleComplex *d_tfg, int num_slot, int ant_po
             tfg_rs.x = d_tfg[(copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12)].x;
             tfg_rs.y = d_tfg[(copy_rs_slot * n_symb_dl + copy_l_rs) * 72 + copy_k_offset + 6 * (tid % 12)].y;
 
-            conj_std_rs.x = SQRT2_INV * (1.0 - ((rs_bits & 0x1) * 2));
-            conj_std_rs.y = - SQRT2_INV * (1.0 - (rs_bits & 0x2));
+            std_rs.x = SQRT2_INV * (1.0 - ((rs_bits & 0x1) * 2));
+            std_rs.y = SQRT2_INV * (1.0 - (rs_bits & 0x2));
 
-            rcvd_rs[copy_pos].x = CMPLX_A_MUL_B_r(tfg_rs, conj_std_rs);
-            rcvd_rs[copy_pos].y = CMPLX_A_MUL_B_i(tfg_rs, conj_std_rs);
+            rcvd_rs[copy_pos].x = CMPLX_A_MUL_CONJ_B_r(tfg_rs, std_rs);
+            rcvd_rs[copy_pos].y = CMPLX_A_MUL_CONJ_B_i(tfg_rs, std_rs);
         } else {
             rcvd_rs[copy_pos].x = 0.0;
             rcvd_rs[copy_pos].y = 0.0;
