@@ -639,7 +639,7 @@ __global__ void peak_search_kernel(LTE_SAMPLE_AUX_DATA *d_lte_sample_aux_data, d
                 for (unsigned int i = 0; i < 2 * ds_comb_arm + 1; i++) {
                     if (d_xc_incoherent_single[peak_n_id_2 * 9600 + t] > best_pow) {
                         best_ind = t;
-                        best_pow = d_xc_incoherent_single[(freq_idx * 3 + peak_n_id_2) * 9600 + t];
+                        best_pow = d_xc_incoherent_single[peak_n_id_2 * 9600 + t];
                     }
                     t++;
                     if (t >= 9600) t-= 9600;
