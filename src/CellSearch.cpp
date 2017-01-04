@@ -442,14 +442,16 @@ void config_usb(
 extern "C" void cuda_reset_device();
 extern "C" void cuda_generate_fft_aux_data(int N);
 extern "C" void cuda_copy_constant_data_to_device();
-extern "C" void cuda_xcorr_pss_peak_search(const itpp::cvec &capbuf, const itpp::vec &f_search_set, const uint8 &ds_comb_arm, const double &fc_requested, const double &fc_programmed,
-                                           const double &fs_programmed,
+extern "C" void cuda_xcorr_pss_peak_search(void * &raw_capbuf, const unsigned int &n_cap, 
+                                           const itpp::vec &f_search_set, const uint8 &ds_comb_arm, 
+                                           const double &fc_requested, const double &fc_programmed, const double &fs_programmed,
                                            // Outputs
-                                           list <Cell> &cells);
+                                           list <Cell> &cells, void * &d_raw_capbuf);
 extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est
-                                          (Cell & cell, const cvec & capbuf_raw, const double & fc_requested, const double & fc_programmed, const double & fs_programmed,
+                                          (Cell & cell, void * &d_raw_capbuf, const unsigned int n_cap, const double & fc_requested, const double & fc_programmed, const double & fs_programmed,
                                            // Output
                                            cmat & my_tfg_comp);
+extern "C" void cuda_free_memory(void *ptr);
 
 // Main cell search routine.
 int main(
@@ -502,7 +504,9 @@ int main(
     // Fill capture buffer
     cvec capbuf;
     double fc_programmed;
-    capture_data(fc_requested,correction,save_cap,use_recorded_data,data_dir,dev,capbuf,fc_programmed);
+    void *capbuf_raw, *d_capbuf_raw;
+    unsigned int n_cap;
+    capture_data(fc_requested,correction,save_cap,use_recorded_data,data_dir,dev,capbuf,capbuf_raw,n_cap,fc_programmed);
 
     // Correlate
 #define DS_COMB_ARM 2
@@ -522,7 +526,7 @@ int main(
     list <Cell> peak_search_cells;
 
     if (use_cuda) {
-      cuda_xcorr_pss_peak_search(capbuf,f_search_set,DS_COMB_ARM,fc_requested,fc_programmed,fs_programmed, peak_search_cells);
+      cuda_xcorr_pss_peak_search(capbuf_raw, n_cap, f_search_set, DS_COMB_ARM, fc_requested, fc_programmed, fs_programmed, peak_search_cells, d_capbuf_raw);
     } else {
       xcorr_pss(capbuf,f_search_set,DS_COMB_ARM,fc_requested,fc_programmed,fs_programmed,xc_incoherent_collapsed_pow,xc_incoherent_collapsed_frq,xc_incoherent_single,xc_incoherent,sp_incoherent,xc,sp,n_comb_xc,n_comb_sp);
 
@@ -550,7 +554,7 @@ int main(
 
       if (use_cuda) {
         cmat tfg_comp;
-        (*iterator) = cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est((*iterator), capbuf, fc_requested, fc_programmed, fs_programmed, tfg_comp);
+        (*iterator) = cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est((*iterator), d_capbuf_raw, n_cap, fc_requested, fc_programmed, fs_programmed, tfg_comp);
 
         if ((*iterator).n_id_1 == -1) {
           iterator = detected_cells[fci].erase(iterator);
@@ -620,6 +624,10 @@ int main(
         cout << "    residual frequency offset: " << (*iterator).freq_superfine << " Hz" << endl;
       }
       ++iterator;
+    }
+
+    if (use_cuda) {
+      cuda_free_memory(d_capbuf_raw);
     }
   }
 

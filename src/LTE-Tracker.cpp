@@ -590,6 +590,8 @@ double kalibrate(
   // Loop until a cell is found
   while (detected_cells.size()<1) {
     cvec capbuf;
+    void *capbuf_raw;
+    unsigned int n_cap;
     // Fill capture buffer either from a file or from live data.
     if (use_recorded_data) {
       capbuf.set_size(153600);
@@ -608,7 +610,7 @@ double kalibrate(
       }
       fc_programmed=fc_requested;
     } else {
-      capture_data(fc_requested,1.0,false,false,".",dev,capbuf,fc_programmed);
+      capture_data(fc_requested,1.0,false,false,".",dev,capbuf,capbuf_raw,n_cap,fc_programmed);
     }
     //cout << "Capbuf power: " << db10(sigpower(capbuf)) << " dB" << endl;
     if (noise_power)

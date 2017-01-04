@@ -36,6 +36,9 @@ using namespace std;
 
 typedef struct {
   vector <unsigned char> * buf;
+  unsigned char *raw_buf;
+  int raw_buf_len;
+  bool raw_buf_only;
   rtlsdr_dev_t * dev;
 } callback_package_t;
 static void capbuf_rtlsdr_callback(
@@ -54,6 +57,14 @@ static void capbuf_rtlsdr_callback(
   if (len==0) {
     cerr << "Error: received no samples from USB device..." << endl;
     ABORT(-1);
+  }
+
+  int cp_size = (cp_p->raw_buf_len + len < CAPLENGTH * 2) ? len : (CAPLENGTH * 2 - cp_p->raw_buf_len);
+  memcpy(&cp_p->raw_buf[cp_p->raw_buf_len], buf, cp_size);
+  cp_p->raw_buf_len += cp_size;
+  if (cp_p->raw_buf_only) {
+    rtlsdr_cancel_async(dev);
+    return;
   }
 
   for (uint32 t=0;t<len;t++) {
@@ -88,6 +99,8 @@ void capture_data(
   rtlsdr_dev_t * & dev,
   // Output
   cvec & capbuf,
+  void * & h_capbuf_raw,
+  unsigned int &n_cap,
   double & fc_programmed
 ) {
   // Filename used for recording or loading captured data.
@@ -160,27 +173,33 @@ void capture_data(
     capbuf_raw.reserve(CAPLENGTH*2);
     callback_package_t cp;
     cp.buf=&capbuf_raw;
+    h_capbuf_raw = (void *)malloc(CAPLENGTH*2);
+    cp.raw_buf = (unsigned char *)h_capbuf_raw;
+    cp.raw_buf_len = 0;
+    cp.raw_buf_only = false;
     cp.dev=dev;
 
+    n_cap = CAPLENGTH;
     rtlsdr_read_async(dev,capbuf_rtlsdr_callback,(void *)&cp,0,0);
 
-    // Convert to complex
-    capbuf.set_size(CAPLENGTH);
+    if (true || save_cap) {
+      // Convert to complex
+      capbuf.set_size(CAPLENGTH);
 #ifndef NDEBUG
-    capbuf=NAN;
+      capbuf=NAN;
 #endif
-    for (uint32 t=0;t<CAPLENGTH;t++) {
-      // Normal
-      capbuf(t)=complex<double>((((double)capbuf_raw[(t<<1)])-127.0)/128.0,(((double)capbuf_raw[(t<<1)+1])-127.0)/128.0);
-      // Conjugate
-      //capbuf(t)=complex<double>((capbuf_raw[(t<<1)]-127.0)/128.0,-(capbuf_raw[(t<<1)+1]-127.0)/128.0);
-      // Swap I/Q
-      //capbuf(t)=complex<double>((capbuf_raw[(t<<1)+1]-127.0)/128.0,(capbuf_raw[(t<<1)]-127.0)/128.0);
-      // Swap I/Q and conjugate
-      //capbuf(t)=complex<double>((capbuf_raw[(t<<1)+1]-127.0)/128.0,-(capbuf_raw[(t<<1)]-127.0)/128.0);
+      for (uint32 t=0;t<CAPLENGTH;t++) {
+        // Normal
+        capbuf(t)=complex<double>((((double)capbuf_raw[(t<<1)])-127.0)/128.0,(((double)capbuf_raw[(t<<1)+1])-127.0)/128.0);
+        // Conjugate
+        //capbuf(t)=complex<double>((capbuf_raw[(t<<1)]-127.0)/128.0,-(capbuf_raw[(t<<1)+1]-127.0)/128.0);
+        // Swap I/Q
+        //capbuf(t)=complex<double>((capbuf_raw[(t<<1)+1]-127.0)/128.0,(capbuf_raw[(t<<1)]-127.0)/128.0);
+        // Swap I/Q and conjugate
+        //capbuf(t)=complex<double>((capbuf_raw[(t<<1)+1]-127.0)/128.0,-(capbuf_raw[(t<<1)]-127.0)/128.0);
+      }
+      //cout << "capbuf power: " << db10(sigpower(capbuf)) << " dB" << endl;
     }
-    //cout << "capbuf power: " << db10(sigpower(capbuf)) << " dB" << endl;
-
   }
 
   // Save the capture data, if requested.

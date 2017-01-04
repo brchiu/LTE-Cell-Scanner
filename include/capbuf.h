@@ -30,6 +30,8 @@ void capture_data(
   rtlsdr_dev_t * & dev,
   // Output
   itpp::cvec & capbuf,
+  void * &capbuf_raw,
+  unsigned int &n_cap,
   double & fc_programmed
 );
 

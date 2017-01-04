@@ -194,6 +194,15 @@ extern "C" void cuda_reset_device()
 }
 
 
+
+/*
+ *  Wrapper of cudaFree()
+ */
+extern "C" void cuda_free_memory(void *ptr)
+{
+    checkCudaErrors(cudaFree(ptr));
+}
+
 /*
  *  Copy constant data to CUDA device.
  *
@@ -718,20 +727,23 @@ __global__ void peak_search_kernel(LTE_SAMPLE_AUX_DATA *d_lte_sample_aux_data, d
 /*
  *
  */
-extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
+extern "C" void cuda_xcorr_pss_peak_search(const void * &raw_capbuf,
+                                           const unsigned int &n_cap,
                                            const vec & f_search_set,
                                            const uint8 & ds_comb_arm,
                                            const double & fc_requested,
                                            const double & fc_programmed,
                                            const double & fs_programmed,
                                            // Outputs
-                                           list <Cell> &cells)
+                                           list <Cell> &cells,
+                                           void * &d_raw_capbuf)
 {
-    const unsigned int n_cap = capbuf.length() < MAX_CAPTURE_SIZE ? capbuf.length() : MAX_CAPTURE_SIZE;
     const unsigned int n_f = f_search_set.length();
     const unsigned int n_comb_xc = (n_cap - 100) / 9600;
 
-    double *h_f_search_set = (double *)NULL, *d_f_search_set = (double *)NULL;
+    double h_f_search_set[n_f];
+    double *d_f_search_set = (double *)NULL;
+    unsigned char *h_raw_capbuf = (unsigned char *)raw_capbuf;
 
     LTE_SAMPLE_CAPTURE *h_lte_sample_capture = (LTE_SAMPLE_CAPTURE *)NULL;
     LTE_SAMPLE_CAPTURE *d_lte_sample_capture = (LTE_SAMPLE_CAPTURE *)NULL;
@@ -741,7 +753,6 @@ extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
     LTE_CELL_INFO *d_lte_cell_info = (LTE_CELL_INFO *)NULL;
 
     h_lte_sample_capture = (LTE_SAMPLE_CAPTURE *)malloc(sizeof(LTE_SAMPLE_CAPTURE));
-    h_f_search_set = (double *)malloc(n_f * sizeof(double));
     h_lte_cell_info = (LTE_CELL_INFO *)calloc(1, MAX_CELL_PER_FREQ * sizeof(LTE_CELL_INFO));
 
     checkCudaErrors(cudaMalloc(&d_lte_sample_capture, sizeof(LTE_SAMPLE_CAPTURE)));
@@ -751,9 +762,10 @@ extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
     checkCudaErrors(cudaMalloc(&d_lte_cell_info, MAX_CELL_PER_FREQ * sizeof(LTE_CELL_INFO)));
 
     for (unsigned int i = 0; i < n_cap; i++) {
-        h_lte_sample_capture->capbuf[i].x = capbuf[i].real();
-        h_lte_sample_capture->capbuf[i].y = capbuf[i].imag();
+        h_lte_sample_capture->capbuf[i].x = (1.0 * h_raw_capbuf[i*2+0] - 127.0)/128.0;
+        h_lte_sample_capture->capbuf[i].y = (1.0 * h_raw_capbuf[i*2+1] - 127.0)/128.0;
     }
+    free(h_raw_capbuf);
 
     checkCudaErrors(cudaMemcpy(d_lte_sample_capture, h_lte_sample_capture, sizeof(LTE_SAMPLE_CAPTURE), cudaMemcpyHostToDevice));
 
@@ -832,11 +844,16 @@ extern "C" void cuda_xcorr_pss_peak_search(const cvec & capbuf,
         cells.push_back(cell);
     }
 
+    if (cells.size() == 0) {
+        checkCudaErrors(cudaFree(d_lte_sample_capture));
+        d_raw_capbuf = (void *)NULL;
+    } else {
+        d_raw_capbuf = (void *)d_lte_sample_capture;
+    }
+
     free(h_lte_sample_capture);
-    free(h_f_search_set);
     free(h_lte_cell_info);
 
-    checkCudaErrors(cudaFree(d_lte_sample_capture));
     checkCudaErrors(cudaFree(d_lte_sample_aux_data));
     checkCudaErrors(cudaFree(d_lte_sample_per_freq_aux_data));
     checkCudaErrors(cudaFree(d_f_search_set));
@@ -3602,15 +3619,14 @@ extern void ce_interp_hex(const cmat & ce_filt, const ivec & shift, const int16 
  */
 extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     const Cell & cell,
-    const cvec & capbuf_raw,
+    const void * & d_raw_capbuf,
+    const unsigned int n_cap,
     const double & fc_requested,
     const double & fc_programmed,
     const double & fs_programmed,
     // Output
     cmat &my_tfg_comp)
 {
-    const unsigned int n_cap = capbuf_raw.length();
-
     Cell cell_out(cell);
 
     cuDoubleComplex *h_capbuf = (cuDoubleComplex *)NULL, *d_capbuf = (cuDoubleComplex *)NULL;
@@ -3627,16 +3643,7 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     checkCudaErrors(cudaMalloc(&d_cp_type, sizeof(int)));
     checkCudaErrors(cudaMalloc(&d_frame_start, sizeof(double)));
 
-    h_capbuf = (cuDoubleComplex *)malloc(n_cap * sizeof(cuDoubleComplex));
-
-    for (unsigned int i = 0; i < n_cap; i++) {
-        h_capbuf[i].x = capbuf_raw[i].real();
-        h_capbuf[i].y = capbuf_raw[i].imag();
-    }
-
-    checkCudaErrors(cudaMalloc(&d_capbuf, n_cap * sizeof(cuDoubleComplex)));
-    checkCudaErrors(cudaMemcpy(d_capbuf, h_capbuf, n_cap * sizeof(cuDoubleComplex), cudaMemcpyHostToDevice));
-    checkCudaErrors(cudaDeviceSynchronize());
+    d_capbuf = (cuDoubleComplex *)d_raw_capbuf;
 
     /* prologue of function sss_detect() of searcher.cpp */
 
@@ -3693,7 +3700,6 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
         free(h_lte_decode_aux_data);
 
         checkCudaErrors(cudaFree(d_lte_decode_aux_data));
-        checkCudaErrors(cudaFree(d_capbuf));
         checkCudaErrors(cudaFree(d_adjust_f));
         checkCudaErrors(cudaFree(d_residual_f));
         checkCudaErrors(cudaFree(d_frame_start));
@@ -3858,7 +3864,6 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     free(h_lte_decode_aux_data);
 
     checkCudaErrors(cudaFree(d_lte_decode_aux_data));
-    checkCudaErrors(cudaFree(d_capbuf));
     checkCudaErrors(cudaFree(d_adjust_f));
     checkCudaErrors(cudaFree(d_residual_f));
     checkCudaErrors(cudaFree(d_frame_start));
