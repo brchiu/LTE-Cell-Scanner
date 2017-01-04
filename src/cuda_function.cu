@@ -1608,8 +1608,14 @@ __global__ void sss_detect_ml_decision_kernel(double *d_log_lik, int thresh2_n_s
 
 #undef WRAP
 #define WRAP(x,sm,lg) (fmod((x)-(sm),(lg)-(sm))+(sm))
-        if (frame_start < 0) frame_start += ((2 * 9600.0 - 0.5) * 16 / FS_LTE * fs_programmed * k_factor + 0.5);
-        frame_start = WRAP(frame_start, -0.5, (2*9600.0-0.5)*16/FS_LTE*fs_programmed*k_factor);
+        // frame_start = WRAP(frame_start, -0.5, (2*9600.0-0.5)*16/FS_LTE*fs_programmed*k_factor);
+
+        double fmod_value = (2 * 9600.0 - 0.5) * 16 / FS_LTE * fs_programmed * k_factor + 0.5;
+        if (frame_start < 0)
+            frame_start += fmod_value;
+        else if (frame_start > fmod_value)
+            frame_start -= fmod_value;
+        frame_start += 0.5;
 
         if (max_value < log_lik_mean + sqrt(log_lik_var) * thresh2_n_sigma)
             return;
@@ -3704,13 +3710,13 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
 
     const unsigned int pss_sss_dist = lround((128 + (n_symb_dl == 7 ? 9 : 32)) * 16 / FS_LTE * fs_programmed * k_factor);
     double first_sss_dft_location = frame_start + (960 - 128 - (n_symb_dl == 7 ? 9 : 32)-128) * 16 / FS_LTE * fs_programmed * k_factor;
-    const int n_sss = ceil((n_cap - 127 - pss_sss_dist - 100) / (9600 * 16 / FS_LTE * fs_programmed * k_factor));
     int sn = 0;
     first_sss_dft_location = fmod(first_sss_dft_location + 0.5, 19200.0) - 0.5;
     if (first_sss_dft_location - 9600 * k_factor > -0.5) {
         first_sss_dft_location -= 9600 * k_factor;
         sn = 1;
     }
+    const int n_sss = ceil((n_cap - 127 - pss_sss_dist - first_sss_dft_location) / (9600 * 16 / FS_LTE * fs_programmed * k_factor));
 
     const unsigned int n_id_cell = cell_out.n_id_cell();
 
