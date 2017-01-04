@@ -178,6 +178,9 @@ typedef struct {
     double           metrics[4 * 3 * 64];
     unsigned int     pbch_bits[4 * 3 * 64];
 
+    int              frame_timing;
+    int              n_antt_ports;
+
 } LTE_DECODE_AUX_DATA;
 
 
@@ -3084,8 +3087,8 @@ __global__ void decode_mib_lower_half_step1_kernel(LTE_DECODE_AUX_DATA *d_lte_de
     cuDoubleComplex *d_ce_tfg    = (cuDoubleComplex *) &(d_lte_decode_aux_data->ce_tfg[0]);
     double          *d_np_v      = (double *) &(d_lte_decode_aux_data->np_v[0]);
     double          *d_soft_bits = (double *) &(d_lte_decode_aux_data->soft_bits[0]);
-    cuDoubleComplex *d_pbch_sym  = (cuDoubleComplex *) &(d_lte_decode_aux_data->pbch_sym[0]);
-    double          *d_np        = (double *) &(d_lte_decode_aux_data->np[0]);
+    // cuDoubleComplex *d_pbch_sym  = (cuDoubleComplex *) &(d_lte_decode_aux_data->pbch_sym[0]);
+    // double          *d_np        = (double *) &(d_lte_decode_aux_data->np[0]);
 
     /* 20 * (0..3) * n_symb_dl + fr * 20 * n_symb_dl + n_symb_dl + (0..3); */
 
@@ -3516,15 +3519,18 @@ __global__ void decode_mib_lower_half_step3_kernel(double *d_subblocks,
 /*
  *
  */
-__global__ void decode_mib_lower_half_step4_kernel(double *d_metrics, unsigned int *d_pbch_bits)
+__global__ void decode_mib_lower_half_step4_kernel(LTE_DECODE_AUX_DATA *d_lte_decode_aux_data)
 {
-    __shared__ double metrics[64];
-    __shared__ int    pbch_bits[64];
+    __shared__ double       metrics[64];
+    __shared__ unsigned int pbch_bits[64];
 
     const unsigned int frame_timing_guess = blockIdx.x; /* frame_timing_guess : 0..3                   */
     const unsigned int antt = blockIdx.y;               /* number of antenna  : 0 -> 1, 1 -> 2, 2 -> 4 */
     const unsigned int tid = threadIdx.x;
     const unsigned int offset = (frame_timing_guess * 3 + antt) * 64;
+
+    double *d_metrics = (double *)&(d_lte_decode_aux_data->metrics[0]);
+    unsigned int *d_pbch_bits = (unsigned int *)&(d_lte_decode_aux_data->pbch_bits[0]);
 
     metrics[tid] = d_metrics[offset + tid];
     metrics[tid + 32] = d_metrics[offset + tid + 32];
@@ -3543,8 +3549,13 @@ __global__ void decode_mib_lower_half_step4_kernel(double *d_metrics, unsigned i
         __syncthreads();
     }
 
-    if ((tid == 0) && (metrics[0] != -CUDART_INF)) {
-        printf("step4 frame_timing_guess %d antt %d sum_metric %lf phch_bits %08X crc_bits %08X crc_check %08X\n", frame_timing_guess, antt, metrics[0], pbch_bits[0]);
+    if (tid == 0) {
+        if (metrics[0] != -CUDART_INF)
+            printf("MIB decode success : frame_timing_guess %d antt %d sum_metric %lf phch_bits %08X crc_bits %08X crc_check %08X\n", frame_timing_guess, 1 << antt, metrics[0], pbch_bits[0]);
+        d_metrics[0] = metrics[0];
+        d_pbch_bits[0] = pbch_bits[0];
+        d_lte_decode_aux_data->frame_timing = frame_timing_guess;
+        d_lte_decode_aux_data->n_antt_ports = (1 << antt);
     }
 }
 
@@ -3811,11 +3822,31 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
                                                                &(d_lte_decode_aux_data->pbch_bits[0]));
     checkCudaErrors(cudaDeviceSynchronize());
 
-    decode_mib_lower_half_step4_kernel<<<dim3(4, 3), 32>>>(&(d_lte_decode_aux_data->metrics[0]), &(d_lte_decode_aux_data->pbch_bits[0]));
+    decode_mib_lower_half_step4_kernel<<<dim3(4, 3), 32>>>(d_lte_decode_aux_data);
     checkCudaErrors(cudaDeviceSynchronize());
 
     checkCudaErrors(cudaMemcpy(h_lte_decode_aux_data, d_lte_decode_aux_data, sizeof(LTE_DECODE_AUX_DATA), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaDeviceSynchronize());
+
+    if (h_lte_decode_aux_data->metrics[0] != -std::numeric_limits<double>::infinity()) {
+        const int bw[6] = {6, 15, 25, 50, 75, 100};
+        const phich_resource_t::phich_resource_t phich_resource[4] = {phich_resource_t::oneSixth, phich_resource_t::half, phich_resource_t::one, phich_resource_t::two};
+        const int fourbits_rev[16] = {0x0, 0x8, 0x4, 0xC, 0x2, 0xA, 0x6, 0xE, 0x1, 0x9, 0x5, 0xD, 0x3, 0x7, 0xF};
+        const int threebits_rev[8] = {0x0, 0x4, 0x2, 0x6, 0x1, 0x5, 0x3, 0x7};
+        const int twobits_rev[4] = {0x0, 0x2, 0x1, 0x3};
+
+        unsigned int pbch_bits = h_lte_decode_aux_data->pbch_bits[0];
+
+        cell_out.n_rb_dl = bw[threebits_rev[pbch_bits & 0x7]];
+        cell_out.phich_duration = (pbch_bits & 0x8) ? phich_duration_t::EXTENDED : phich_duration_t::NORMAL;
+        cell_out.phich_resource = phich_resource[twobits_rev[(pbch_bits >> 4) & 0x3]];
+
+        unsigned int sfn_temp = fourbits_rev[(pbch_bits >> 6) & 0xF] * 16 + fourbits_rev[(pbch_bits >> 10) & 0xF];
+        cell_out.sfn = (sfn_temp * 4 - h_lte_decode_aux_data->frame_timing + 1024) % 1024;
+        cell_out.n_ports = h_lte_decode_aux_data->n_antt_ports;
+
+        printf("metrics %lf\n", h_lte_decode_aux_data->metrics[0]);
+    }
 
     free(h_capbuf);
     free(h_lte_decode_aux_data);

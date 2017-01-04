@@ -558,12 +558,18 @@ int main(
         }
 
         // Create object containing all RS
-        RS_DL rs_dl((*iterator).n_id_cell(), 6, (*iterator).cp_type);
+        // RS_DL rs_dl((*iterator).n_id_cell(), 6, (*iterator).cp_type);
 
         // Finally, attempt to decode the MIB
-        (*iterator) = decode_mib((*iterator), tfg_comp, rs_dl);
+        // (*iterator) = decode_mib((*iterator), tfg_comp, rs_dl);
 
         // (*iterator) = decode_mib_lower_half((*iterator), tfg_comp);
+
+        if ((*iterator).n_rb_dl==-1) {
+          // No MIB could be successfully decoded.
+          iterator = detected_cells[fci].erase(iterator);
+          continue;
+        }
       } else {
         // Detect SSS if possible
         vec sss_h1_np_est_meas;
