@@ -3766,17 +3766,8 @@ extern "C" Cell cuda_sss_detect_pss_sss_foe_extract_tfg_tfoec_chan_est(
     chan_est_four_port_step2_kernel<<<4, 122 * 2>>>(&(d_lte_decode_aux_data->err_pwr_acc[0]), 122, &(d_lte_decode_aux_data->np_v[0]));
     checkCudaErrors(cudaDeviceSynchronize());
 
-    checkCudaErrors(cudaMemcpy(&(h_lte_decode_aux_data->tfg[0]), &(d_lte_decode_aux_data->tfg[0]), sizeof(d_lte_decode_aux_data->tfg), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaMemcpy(&(h_lte_decode_aux_data->ce_filt[0]), &(d_lte_decode_aux_data->ce_filt[0]), sizeof(d_lte_decode_aux_data->ce_filt), cudaMemcpyDeviceToHost));
     checkCudaErrors(cudaDeviceSynchronize());
-
-    my_tfg_comp = cmat(n_ofdm_sym, 72);
-    for (int i = 0; i < n_ofdm_sym; i++) {
-        for (unsigned int j = 0; j < 72; j++) {
-            my_tfg_comp(i,j).real() = h_lte_decode_aux_data->tfg[i * 72 + j].x;
-            my_tfg_comp(i,j).imag() = h_lte_decode_aux_data->tfg[i * 72 + j].y;
-        }
-    }
 
     for (int i = 0; i < 4; i++) {
 
