@@ -40,6 +40,7 @@ using namespace std;
 
 uint8 verbosity=1;
 uint8 use_cuda=0;
+uint8 profiling=0;
 
 // Simple usage screen.
 void print_usage() {
@@ -129,11 +130,12 @@ void parse_commandline(
       {"data-dir",     required_argument, 0, 'd'},
       {"device-index", required_argument, 0, 'i'},
       {"cuda",         no_argument,       0, 'g'},
+      {"profiling",    no_argument,       0, 't'},
       {0, 0, 0, 0}
     };
     /* getopt_long stores the option index here. */
     int option_index = 0;
-    int c = getopt_long (argc, argv, "hvbs:e:p:c:rld:i:",
+    int c = getopt_long (argc, argv, "hvbs:e:p:c:rld:i:t",
                      long_options, &option_index);
 
     /* Detect the end of the options. */
@@ -211,6 +213,9 @@ void parse_commandline(
         ABORT(-1);
       case 'g':
         use_cuda = 1;
+        break;
+      case 't':
+        profiling = 1;
         break;
       default:
         ABORT(-1);
@@ -501,6 +506,12 @@ int main(
       cout << "Examining center frequency " << fc_requested/1e6 << " MHz ..." << endl;
     }
 
+    struct timeval tv1, tv2;
+
+    if (profiling) {
+      gettimeofday(&tv1, NULL);
+    }
+
     // Fill capture buffer
     cvec capbuf;
     double fc_programmed;
@@ -628,6 +639,11 @@ int main(
 
     if (use_cuda) {
       cuda_free_memory(d_capbuf_raw);
+    }
+
+    if (profiling) {
+      gettimeofday(&tv2, NULL);
+      cout << "Execution time : " << ((tv2.tv_sec-tv1.tv_sec)*1000000+(tv2.tv_usec-tv1.tv_usec)) / 1000.0 << " ms" << endl;
     }
   }
 
