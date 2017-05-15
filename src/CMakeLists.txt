@@ -12,7 +12,6 @@ TARGET_LINK_LIBRARIES (CellSearch cuda_function)
 TARGET_LINK_LIBRARIES (CellSearch general LTE_MISC)
 TARGET_LINK_LIBRARIES (CellSearch debug itpp_debug ${common_link_libs})
 TARGET_LINK_LIBRARIES (CellSearch optimized itpp ${common_link_libs})
-TARGET_LINK_LIBRARIES (CellSearch /usr/local/cuda/lib64/libcudart.so)
 
 # Create the cell tracker
 ADD_EXECUTABLE (LTE-Tracker LTE-Tracker.cpp producer_thread.cpp tracker_thread.cpp searcher_thread.cpp display_thread.cpp)
@@ -20,7 +19,6 @@ TARGET_LINK_LIBRARIES (LTE-Tracker cuda_function)
 TARGET_LINK_LIBRARIES (LTE-Tracker general LTE_MISC)
 TARGET_LINK_LIBRARIES (LTE-Tracker debug itpp_debug ${common_link_libs})
 TARGET_LINK_LIBRARIES (LTE-Tracker optimized itpp ${common_link_libs})
-TARGET_LINK_LIBRARIES (LTE-Tracker /usr/local/cuda/lib64/libcudart.so)
 
 # Code use to test whether the rtl_sdr dongle is dropping samples
 # or not.
