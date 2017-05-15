@@ -55,6 +55,8 @@ void print_usage() {
   cout << "      reduce status messages from program" << endl;
   cout << "    -i --device-index N" << endl;
   cout << "      specify which attached RTLSDR dongle to use" << endl;
+  cout << "    -g --cuda" << endl;
+  cout << "      specify to use CUDA" << endl;
   cout << "  Frequency search options:" << endl;
   cout << "    -s --freq-start fs" << endl;
   cout << "      frequency where cell search should start" << endl;
@@ -135,7 +137,7 @@ void parse_commandline(
     };
     /* getopt_long stores the option index here. */
     int option_index = 0;
-    int c = getopt_long (argc, argv, "hvbs:e:p:c:rld:i:t",
+    int c = getopt_long (argc, argv, "hvbs:e:p:c:rld:i:gt",
                      long_options, &option_index);
 
     /* Detect the end of the options. */
